@@ -1573,43 +1573,66 @@ module Engine =
                 r._allIslands.Add(newIsland.Id, newIsland)
                 r._activeIslandIds.Add newIsland.Id |> ignore
 
+        let private buildAdjacencyMap
+            (bodies: ICollection<int>)
+            (contacts: IDictionary<int64, 'a>)
+            =
+            
+            let adjacencyMap = new PooledDictionary<int, PooledList<int>>()
+            for bodyId in bodies do
+                adjacencyMap.Add(bodyId, new PooledList<int>())
+
+            for contactKey in contacts.Keys do
+                let struct(id1, id2) = contactKey |> ContactKey.unpack
+                match adjacencyMap.TryGetValue id1 with
+                | true, a1 ->
+                    match adjacencyMap.TryGetValue id2 with
+                    | true, a2 ->
+                        a1.Add id2
+                        a2.Add id1
+                    | _ -> ()
+                | _ -> ()
+                    
+            adjacencyMap
+        
+        let private findSingleConnectedComponent
+            (startNode: int)
+            (adjacencyMap: IDictionary<int, PooledList<int>>)
+            (visited: PooledSet<int>) =
+            
+            let newComponent = new PooledList<int>()
+            use queue = new PooledQueue<int>()
+
+            if not <| visited.Contains startNode then
+                queue.Enqueue startNode
+                visited.Add startNode |> ignore
+
+                while queue.Count > 0 do
+                    let currentId = queue.Dequeue()
+                    newComponent.Add currentId
+
+                    for neighborId in adjacencyMap[currentId].Span do
+                        if visited.Add neighborId then
+                            queue.Enqueue neighborId
+            
+            newComponent
+            
         let private findConnectedComponents
             (bodiesToAnalyze: ICollection<int>)
             (contacts: IDictionary<int64, int>) =
                 
-            use adjacencyMap = new PooledDictionary<int, PooledList<int>>()
+            use adjacencyMap = buildAdjacencyMap bodiesToAnalyze contacts
             let result = new PooledList<PooledList<int>>()
-
-            for bodyId in bodiesToAnalyze do
-                adjacencyMap.Add(bodyId, new PooledList<int>())
-
-            for contactKey in contacts.Keys do
-                let struct(id1, id2) = ContactKey.unpack contactKey
-                if adjacencyMap.ContainsKey id1 && adjacencyMap.ContainsKey id2 then
-                    adjacencyMap[id1].Add id2
-                    adjacencyMap[id2].Add id1
-
             use visited = new PooledSet<int>()
+
             for bodyId in bodiesToAnalyze do
-                if not <| visited.Contains bodyId then
-                    let newComponent = new PooledList<int>()
-                    use queue = new PooledQueue<int>()
-
-                    queue.Enqueue bodyId
-                    visited.Add bodyId |> ignore
-
-                    while queue.Count > 0 do
-                        let currentId = queue.Dequeue()
-                        newComponent.Add currentId
-
-                        for neighborId in adjacencyMap[currentId].Span do
-                            if visited.Add neighborId then
-                                queue.Enqueue neighborId
-                    
+                let newComponent = findSingleConnectedComponent bodyId adjacencyMap visited
+                if newComponent.Count > 0 then
                     result.Add newComponent
-
+                else
+                    newComponent |> Dispose.action
+                    
             adjacencyMap.Values |> Seq.iter Dispose.action
- 
             result
         
         let private hasStaticSupport
@@ -1652,7 +1675,7 @@ module Engine =
                     i <- i + 1
                     
             hasFoundSupport
-            
+        
         let isGrounded
             bodyRepo
             activeHash
@@ -1672,42 +1695,31 @@ module Engine =
 
                 if anchors.Count = 0 then
                     false
+                elif anchors.Count = island.Bodies.Count then
+                    true
                 else
-                    if anchors.Count = island.Bodies.Count then
-                        true
-                    else
-                        use visited = new PooledSet<int>()
-                        use queue = new PooledQueue<int>()
+                    use adjacencyMap = buildAdjacencyMap island.Bodies island.ContactTTL
+                    use visited = new PooledSet<int>()
+                    use queue = new PooledQueue<int>()
+                    
+                    for anchorId in anchors.Span do
+                        if visited.Add anchorId then
+                            queue.Enqueue anchorId
+
+                    while queue.Count > 0 do
+                        let currentId = queue.Dequeue()
+                        match adjacencyMap.TryGetValue currentId with
+                        | true, a ->
+                            for neighborId in a.Span do
+                                if visited.Add neighborId then
+                                    queue.Enqueue neighborId
+                        | _ -> ()
                         
-                        for anchorId in anchors.Span do
-                            if visited.Add anchorId then
-                                queue.Enqueue anchorId
-
-                        use adjacencyMap = new PooledDictionary<int, PooledList<int>>()
-
-                        for bodyId in island.Bodies do
-                            if not <| adjacencyMap.ContainsKey bodyId then
-                                adjacencyMap.Add(bodyId, new PooledList<int>())
-
-                        for contactKey in island.ContactTTL.Keys do
-                            let struct(id1, id2) = contactKey |> ContactKey.unpack
-
-                            if adjacencyMap.ContainsKey id1 && adjacencyMap.ContainsKey id2 then
-                                adjacencyMap[id1].Add id2
-                                adjacencyMap[id2].Add id1
-
-                        while queue.Count > 0 do
-                            let currentId = queue.Dequeue()
-                            if adjacencyMap.ContainsKey currentId then
-                                for neighborId in adjacencyMap[currentId].Span do
-                                    if visited.Add neighborId then
-                                        queue.Enqueue neighborId
-                        
-                        let result = visited.Count = island.Bodies.Count
-
-                        adjacencyMap.Values |> Seq.iter Dispose.action
-                        
-                        result
+                    let isGrounded = visited.Count = island.Bodies.Count
+                    
+                    adjacencyMap.Values |> Seq.iter Dispose.action
+                    
+                    isGrounded
                 
                 
         let getIslandRefForBody bodyId r =
