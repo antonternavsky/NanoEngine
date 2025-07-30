@@ -51,19 +51,19 @@ module Tests =
 
     type TestState =
         {
-            BodyRepo: Body.Repo
-            IslandRepo: Island.Repo
-            FloraRepo: Flora.Repo
-            GeometryRepo: Geometry.Repo
-            LiquidRepo: Liquid.Repo
-            ActiveSpatialHash: SpatialHash.Repo
-            SleepingSpatialHash: SpatialHash.Repo
-            Buffers: Buffers
-            Rnd: Random
-            mutable MutableNextId: int
+            Engine : T
             mutable TestPhase: int
             Memo: Dictionary<string, obj>
         }
+        member inline this.BodyRepo = this.Engine.Bodies
+        member inline this.IslandRepo = this.Engine.Islands
+        member inline this.FloraRepo = this.Engine.Flora
+        member inline this.GeometryRepo = this.Engine.Geometry
+        member inline this.LiquidRepo = this.Engine.Liquid
+        member inline this.ActiveHash = this.Engine.ActiveHash
+        member inline this.SleepingHash = this.Engine.SleepingHash
+        member inline this.Buffers = this.Engine.Buffers
+            
     type TestRunner(initialState: TestState) =
         let mutable _state = initialState
 
@@ -146,13 +146,11 @@ module Tests =
             rawAnchorCoords
 
         member this.CreateTree(q, r, z, height, thickness, mass, breakThreshold) =
-            let pHeight = HEX_HEIGHT
             let supportCoords = SubPrismCoords.Normalize(q, r, z, 6)
-            let baseCenterPos = Grid.getTriangularPrismCenter supportCoords pHeight
+            let baseCenterPos = supportCoords |> Grid.getTriangularPrismCenter
             let treePos = baseCenterPos + Vector3(0.0, 0.0, height / 2.0)
             
-            let treeId = _state.MutableNextId
-            _state.MutableNextId <- _state.MutableNextId + 1
+            let treeId = _state.Engine |> nextBodyId
             let finalTreePos = Vector3(WorldLimits.wrapX treePos.X, WorldLimits.wrapY treePos.Y, treePos.Z)
             let treeData = Flora.create treeId Body.BodyType.Tree mass finalTreePos height thickness supportCoords 0.5 breakThreshold
             _state.FloraRepo |> Flora.addTree treeData
@@ -160,8 +158,7 @@ module Tests =
             
         member _.CreateBody(pos, vel: Vector3, mass, dims, bType, friction) =
             Assert.IsTrue (vel.Magnitude() <= MAX_SPEED + 1e-5) "The initial velocity of the body exceeds the limit"
-            let bodyId = _state.MutableNextId
-            _state.MutableNextId <- _state.MutableNextId + 1
+            let bodyId = _state.Engine |> nextBodyId
             let body = Body.T(bodyId, bType, mass, dims, Matrix3x3.Identity, pos, vel, SubPrismCoords.Zero, friction)
             Body.tryAdd &body _state.BodyRepo |> ignore
             bodyId
@@ -206,24 +203,11 @@ let main _ =
     let runTest (testDef: TestDefinition) (location: TestLocation) =
         printfn "Location: %s" (location.ToString())
         
-        let geometryRepo = Geometry.createRepo()
-        let bodyRepo = Body.createRepo()
-
-        use activeHash = SpatialHash.createRepo()
-        use sleepingHash = SpatialHash.createRepo()
+        use engine = createEngine dt
 
         let initialState =
             {
-                BodyRepo = bodyRepo
-                IslandRepo = Island.createRepo bodyRepo activeHash sleepingHash
-                FloraRepo = Flora.createRepo geometryRepo
-                GeometryRepo = geometryRepo
-                LiquidRepo = Liquid.createRepo geometryRepo
-                ActiveSpatialHash = activeHash
-                SleepingSpatialHash = sleepingHash
-                Buffers = Buffers.Create()
-                Rnd = Random(123)
-                MutableNextId = 1
+                Engine = engine
                 TestPhase = 0
                 Memo = Dictionary<string, obj>()
             }
@@ -246,17 +230,7 @@ let main _ =
             while i <= testDef.MaxSteps do
                 if continueLoop then
 
-                    Simulation.step
-                        runner.State.BodyRepo
-                        runner.State.IslandRepo
-                        runner.State.FloraRepo
-                        runner.State.GeometryRepo
-                        runner.State.LiquidRepo
-                        runner.State.ActiveSpatialHash
-                        runner.State.SleepingSpatialHash
-                        dt
-                        runner.State.Buffers
-                        runner.State.Rnd
+                    engine |> Simulation.step 
 
                     let phases = [||]
                     if isProblematicTest && (phases |> Array.contains runner.State.TestPhase)then
@@ -298,7 +272,7 @@ let main _ =
                 
             runner.Memoize("platformCenterGridCoords", centerGridCoords)
 
-            let centerWorldPos = Grid.getTriangularPrismCenter centerGridCoords HEX_HEIGHT
+            let centerWorldPos = centerGridCoords |> Grid.getTriangularPrismCenter
             
             let surfaceZ = (double platZ + 1.0) * HEX_HEIGHT
             runner.Memoize("platformSurfaceZ", surfaceZ)
