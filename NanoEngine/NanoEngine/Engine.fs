@@ -710,7 +710,7 @@ module Engine =
     [<RequireQualifiedAccess>]
     module Collision =
 
-        let inline getAABB (position: Vector3) (dimensions: Vector3) (orientation: Matrix3x3) =
+        let getAABB (position: Vector3) (dimensions: Vector3) (orientation: Matrix3x3) =
             
             let h = dimensions / 2.0
             let corners : Span<Vector3> = Stack.alloc 8
@@ -2780,12 +2780,13 @@ module Engine =
         let private resolveDynamicDynamicCollision
             (b1: byref<Body.T>)
             (b2: byref<Body.T>)
+            (minA: inref<Vector3>)
+            (maxA: inref<Vector3>)
+            (minB: inref<Vector3>)
+            (maxB: inref<Vector3>)
             islandRepo
             dt =
                 
-            let struct(minA, maxA) = Collision.getAABB b1.Position b1.Dimensions b1.Orientation
-            let struct(minB, maxB) = Collision.getAABB b2.Position b2.Dimensions b2.Orientation
-
             if Collision.checkCollisionAABB minA maxA minB maxB then
                 let result =
                     Collision.checkCollisionSAT
@@ -2799,38 +2800,56 @@ module Engine =
                 if result.AreColliding then
                     let struct(finalNormal, penetrationDepth) = result.Normalize()
                     let stableResult = CollisionResult(finalNormal * penetrationDepth)
-                    let totalImpulseScalar = resolveDynamicCollision &b1 &b2 stableResult b1.InvMass b2.InvMass
+                    let totalImpulseScalar =
+                        resolveDynamicCollision
+                            &b1
+                            &b2
+                            stableResult
+                            b1.InvMass
+                            b2.InvMass
                                                 
-                    resolveDynamicFriction &b1 &b2 finalNormal totalImpulseScalar b1.InvMass b2.InvMass dt
+                    resolveDynamicFriction
+                        &b1
+                        &b2
+                        finalNormal
+                        totalImpulseScalar
+                        b1.InvMass
+                        b2.InvMass
+                        dt
 
-                    let island1_ref = &Island.getIslandRefForBody b1.Id islandRepo
-                    let island2_ref = &Island.getIslandRefForBody b2.Id islandRepo
-                                        
-                    if island1_ref.Id <> island2_ref.Id then
-                        islandRepo |> Island.requestMerge island1_ref.Id island2_ref.Id
-                                                        
+                    let island1 = &Island.getIslandRefForBody b1.Id islandRepo
+                    let island2 = &Island.getIslandRefForBody b2.Id islandRepo
+                    
                     let contactKey = ContactKey.key b1.Id b2.Id
-                    island1_ref.ContactTTL.AddOrUpdate(contactKey, CONTACT_TTL)
-                    if island1_ref.Id <> island2_ref.Id then
-                        island2_ref.ContactTTL.AddOrUpdate(contactKey, CONTACT_TTL)
+                    island1.ContactTTL.AddOrUpdate(contactKey, CONTACT_TTL)
+                    
+                    if island1.Id <> island2.Id then
+                        islandRepo |> Island.requestMerge island1.Id island2.Id
+                        island2.ContactTTL.AddOrUpdate(contactKey, CONTACT_TTL)                                
 
                     b1.IsSnappedToGrid <- false
                     b2.IsSnappedToGrid <- false
-            elif checkBodyProximity minA maxA minB maxB then
-                let island1_ref = &Island.getIslandRefForBody b1.Id islandRepo
-                let island2_ref = &Island.getIslandRefForBody b2.Id islandRepo
+                elif checkBodyProximity minA maxA minB maxB then
+                    let island1 = &Island.getIslandRefForBody b1.Id islandRepo
+                    let island2 = &Island.getIslandRefForBody b2.Id islandRepo
 
-                if island1_ref.Id = island2_ref.Id then
-                    let contactKey = ContactKey.key b1.Id b2.Id
-                    island1_ref.ContactTTL.AddOrUpdate(contactKey, CONTACT_TTL)
-
+                    if island1.Id = island2.Id then
+                        let contactKey = ContactKey.key b1.Id b2.Id
+                        island1.ContactTTL.AddOrUpdate(contactKey, CONTACT_TTL)
+        
         let private resolveDynamicSleepingCollision
             (b1: byref<Body.T>)
-            (b2_sleeping: byref<Body.T>)
+            (b2: byref<Body.T>)
+            (minA: inref<Vector3>)
+            (maxA: inref<Vector3>)
             islandRepo
             dt =
-            let struct(minA, maxA) = Collision.getAABB b1.Position b1.Dimensions b1.Orientation
-            let struct(minB, maxB) = Collision.getAABB b2_sleeping.Position b2_sleeping.Dimensions b2_sleeping.Orientation
+                
+            let struct(minB, maxB) =
+                Collision.getAABB
+                    b2.Position
+                    b2.Dimensions
+                    b2.Orientation
             
             if Collision.checkCollisionAABB minA maxA minB maxB then
                 let result =
@@ -2838,31 +2857,43 @@ module Engine =
                         b1.Position
                         b1.Dimensions
                         b1.Orientation
-                        b2_sleeping.Position
-                        b2_sleeping.Dimensions
-                        b2_sleeping.Orientation
+                        b2.Position
+                        b2.Dimensions
+                        b2.Orientation
                 
                 if result.AreColliding then
                     let struct(finalNormal, penetrationDepth) = result.Normalize()
                     let stableResult = CollisionResult(finalNormal * penetrationDepth)
                                                     
                     let totalImpulseScalar =
-                        resolveDynamicCollision &b1 &b2_sleeping stableResult b1.InvMass b2_sleeping.InvMass
+                        resolveDynamicCollision
+                            &b1
+                            &b2
+                            stableResult
+                            b1.InvMass
+                            b2.InvMass
                                                     
-                    resolveDynamicFriction &b1 &b2_sleeping finalNormal totalImpulseScalar b1.InvMass b2_sleeping.InvMass dt
+                    resolveDynamicFriction
+                        &b1
+                        &b2
+                        finalNormal
+                        totalImpulseScalar
+                        b1.InvMass
+                        b2.InvMass
+                        dt
                                                     
-                    let island1_ref = &Island.getIslandRefForBody b1.Id islandRepo
-                    let island2_sleeping = &Island.getIslandRefForBody b2_sleeping.Id islandRepo
+                    let island1 = &Island.getIslandRefForBody b1.Id islandRepo
+                    let island2 = &Island.getIslandRefForBody b2.Id islandRepo
                                                     
-                    Island.requestWakeIsland &island2_sleeping islandRepo
-                    islandRepo |> Island.requestMerge island2_sleeping.Id island1_ref.Id
+                    Island.requestWakeIsland &island2 islandRepo
+                    islandRepo |> Island.requestMerge island2.Id island1.Id
 
-                    let contactKey = ContactKey.key b1.Id b2_sleeping.Id
-                    island1_ref.ContactTTL.AddOrUpdate(contactKey, CONTACT_TTL)
-                    island2_sleeping.ContactTTL.AddOrUpdate(contactKey, CONTACT_TTL)
+                    let contactKey = ContactKey.key b1.Id b2.Id
+                    island1.ContactTTL.AddOrUpdate(contactKey, CONTACT_TTL)
+                    island2.ContactTTL.AddOrUpdate(contactKey, CONTACT_TTL)
 
                     b1.IsSnappedToGrid <- false
-                    b2_sleeping.IsSnappedToGrid <- false
+                    b2.IsSnappedToGrid <- false
         
         let private resolveStaticGeometryCollision (b1: byref<Body.T>) cellKey dt =
             let struct (pos, dims, orient) = cellKey |> Geometry.getPrismSpaceByKey 
@@ -2955,52 +2986,74 @@ module Engine =
             use processedSleepingPartners = new PooledSet<int>()
             use processedStaticPrisms = new PooledSet<uint64>()
             use processedFloraPartners = new PooledSet<int>()
-                        
+            use aabbCache = new PooledDictionary<int, struct(Vector3 * Vector3)>()
+            
+            for islandId in islandRepo |> Island.getActiveIslandIds do
+                let island = &Island.getIslandRef islandId islandRepo
+                for bodyId in island.Bodies do
+                    let body = &Body.getRef bodyId bodyRepo
+                    let aabb = Collision.getAABB body.Position body.Dimensions body.Orientation
+                    aabbCache.Add(bodyId, aabb)
+                
             for islandId in islandRepo |> Island.getActiveIslandIds do
                 let island = &Island.getIslandRef islandId islandRepo
                 for id1 in island.Bodies do
                     let b1 = &Body.getRef id1 bodyRepo
-                    if not <| Unsafe.IsNullRef &b1 then
-                        let invMass1 = if b1.IsFallingOver then 0.0 else b1.InvMass
+                    let invMass1 = if b1.IsFallingOver then 0.0 else b1.InvMass
 
-                        resolveFloorAndCeilingCollisions &b1 invMass1 sub_dt
+                    resolveFloorAndCeilingCollisions &b1 invMass1 sub_dt
 
-                        processedSleepingPartners.Clear()
-                        processedStaticPrisms.Clear()
-                        processedFloraPartners.Clear()
+                    processedSleepingPartners.Clear()
+                    processedStaticPrisms.Clear()
+                    processedFloraPartners.Clear()
 
-                        let occupiedCellsForBody1 = SpatialHash.getOccupiedCells id1 activeHash
-                        for i = 0 to occupiedCellsForBody1.Length - 1 do
-                            let cellKey = occupiedCellsForBody1[i]
+                    let struct(minA, maxA) = aabbCache[id1]
+                    
+                    let occupiedCellsForBody1 = SpatialHash.getOccupiedCells id1 activeHash
+                    for i = 0 to occupiedCellsForBody1.Length - 1 do
+                        let cellKey = occupiedCellsForBody1[i]
 
-                            // Dynamic <-> Dynamic
-                            for id2 in SpatialHash.query cellKey activeHash do
-                                if id2 > id1 then
-                                    let contactKey = ContactKey.key id1 id2
-                                    if checkedBodyPairs.Add contactKey then
-                                        let b2 = &Body.getRef id2 bodyRepo
-                                        if not <| Unsafe.IsNullRef &b2 then
-                                            resolveDynamicDynamicCollision &b1 &b2 islandRepo sub_dt
+                        // Dynamic <-> Dynamic
+                        for id2 in SpatialHash.query cellKey activeHash do
+                            if id2 > id1 then
+                                let contactKey = ContactKey.key id1 id2
+                                if checkedBodyPairs.Add contactKey then
+                                    let b2 = &Body.getRef id2 bodyRepo
+                                    let struct(minB, maxB) = aabbCache[id2]
+                                    resolveDynamicDynamicCollision
+                                        &b1
+                                        &b2
+                                        &minA
+                                        &maxA
+                                        &minB
+                                        &maxB
+                                        islandRepo
+                                        sub_dt
 
-                            // Dynamic <-> Sleeping
-                            for sleepingId in SpatialHash.query cellKey sleepingHash do
-                                if processedSleepingPartners.Add sleepingId then
-                                    let b2_sleeping = &Body.getRef sleepingId bodyRepo
-                                    if not <| Unsafe.IsNullRef &b2_sleeping then
-                                        resolveDynamicSleepingCollision &b1 &b2_sleeping islandRepo sub_dt
+                        // Dynamic <-> Sleeping
+                        for sleepingId in SpatialHash.query cellKey sleepingHash do
+                            if processedSleepingPartners.Add sleepingId then
+                                let b2 = &Body.getRef sleepingId bodyRepo
+                                resolveDynamicSleepingCollision
+                                    &b1
+                                    &b2
+                                    &minA
+                                    &maxA
+                                    islandRepo
+                                    sub_dt
 
-                            // Dynamic <-> Static Geometry
-                            if geometryRepo |> Geometry.isSolid cellKey then
-                                if processedStaticPrisms.Add cellKey then
-                                    resolveStaticGeometryCollision &b1 cellKey sub_dt
+                        // Dynamic <-> Static Geometry
+                        if geometryRepo |> Geometry.isSolid cellKey then
+                            if processedStaticPrisms.Add cellKey then
+                                resolveStaticGeometryCollision &b1 cellKey sub_dt
 
-                            // Dynamic <-> Flora
-                            match floraRepo |> Flora.tryGetTreesInCell cellKey with
-                            | true, treeIds ->
-                                for treeId in treeIds.Span do
-                                    if not <| destroyedThisFrame.Contains treeId && processedFloraPartners.Add treeId then
-                                        resolveFloraCollision &b1 treeId floraRepo buffers destroyedThisFrame rnd sub_dt
-                            | _ -> ()
+                        // Dynamic <-> Flora
+                        match floraRepo |> Flora.tryGetTreesInCell cellKey with
+                        | true, treeIds ->
+                            for treeId in treeIds.Span do
+                                if not <| destroyedThisFrame.Contains treeId && processedFloraPartners.Add treeId then
+                                    resolveFloraCollision &b1 treeId floraRepo buffers destroyedThisFrame rnd sub_dt
+                        | _ -> ()
 
         let private postProcessAndUpdateSleepState engine =
             let islandRepo = engine._islandRepo
