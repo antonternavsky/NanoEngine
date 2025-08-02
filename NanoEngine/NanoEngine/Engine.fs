@@ -601,6 +601,44 @@ module Engine =
     [<RequireQualifiedAccess>]
     module Geometry =
 
+        let private _precomputedPrismShapes =
+            let precomputePrismShape (sector: int) =
+                let inline calcRelativeHexVertex (index: int) =
+                    let angle = double index * PI / 3.0
+                    Vector3(HEX_RADIUS * cos angle, HEX_RADIUS * sin angle, 0.0)
+
+                let nextSector = (sector + 1) % 6
+
+                let v1_rel = Vector3.Zero
+                let v2_rel = calcRelativeHexVertex sector
+                let v3_rel = calcRelativeHexVertex nextSector
+
+                let xAxis = ((v2_rel + v3_rel) / 2.0 - v1_rel).Normalize()
+                let zAxis = Vector3.Up
+                let yAxis = Vector3.Cross(zAxis, xAxis).Normalize()
+                let orientation = Matrix3x3(xAxis, yAxis, zAxis)
+
+                let baseCenter_rel = (v1_rel + v2_rel + v3_rel) / 3.0
+                let invOrientation = orientation.Transpose()
+                let localV1 = invOrientation * (v1_rel - baseCenter_rel)
+                let localV2 = invOrientation * (v2_rel - baseCenter_rel)
+                let localV3 = invOrientation * (v3_rel - baseCenter_rel)
+
+                let minLocalX = min localV1.X (min localV2.X localV3.X)
+                let maxLocalX = max localV1.X (max localV2.X localV3.X)
+                let minLocalY = min localV1.Y (min localV2.Y localV3.Y)
+                let maxLocalY = max localV1.Y (max localV2.Y localV3.Y)
+                
+                let hx = (maxLocalX - minLocalX) / 2.0
+                let hy = (maxLocalY - minLocalY) / 2.0
+                let hz = HEX_HEIGHT / 4.0
+
+                let dimensions = Vector3(hx, hy, hz) * 2.0
+
+                struct (orientation, dimensions)
+
+            [| for i in 0..5 -> precomputePrismShape i |]
+            
         type Repo =
             private
                 {
@@ -622,40 +660,7 @@ module Engine =
         
         let createPrismSpace (coords: SubPrismCoords) =
             let absolutePrismPos = coords |> Grid.getTriangularPrismCenter
-            
-            let inline calcRelativeHexVertex (index: int) =
-                let angle = double index * PI / 3.0
-                Vector3(HEX_RADIUS * cos angle, HEX_RADIUS * sin angle, 0.0)
-
-            let sector = coords.SubIndex % 6
-            let nextSector = (sector + 1) % 6
-
-            let v1_rel = Vector3.Zero
-            let v2_rel = calcRelativeHexVertex sector
-            let v3_rel = calcRelativeHexVertex nextSector
-
-            let xAxis = ((v2_rel + v3_rel) / 2.0 - v1_rel).Normalize()
-            let zAxis = Vector3.Up
-            let yAxis = Vector3.Cross(zAxis, xAxis).Normalize()
-            let orientation = Matrix3x3(xAxis, yAxis, zAxis)
-
-            let baseCenter_rel = (v1_rel + v2_rel + v3_rel) / 3.0
-            let invOrientation = orientation.Transpose()
-            let localV1 = invOrientation * (v1_rel - baseCenter_rel)
-            let localV2 = invOrientation * (v2_rel - baseCenter_rel)
-            let localV3 = invOrientation * (v3_rel - baseCenter_rel)
-
-            let minLocalX = min localV1.X (min localV2.X localV3.X)
-            let maxLocalX = max localV1.X (max localV2.X localV3.X)
-            let minLocalY = min localV1.Y (min localV2.Y localV3.Y)
-            let maxLocalY = max localV1.Y (max localV2.Y localV3.Y)
-            
-            let hx = (maxLocalX - minLocalX) / 2.0
-            let hy = (maxLocalY - minLocalY) / 2.0
-            let hz = HEX_HEIGHT / 4.0
-
-            let dimensions = Vector3(hx, hy, hz) * 2.0
-
+            let struct (orientation, dimensions) = _precomputedPrismShapes[coords.SubIndex % 6]
             struct (absolutePrismPos, dimensions, orientation)
 
         let addPrism(coords: SubPrismCoords)  (material: Material) r =
@@ -1463,50 +1468,106 @@ module Engine =
 
     [<RequireQualifiedAccess>]
     module Island =
-        [<Struct>]
+        [<Sealed>]
+        type ExpiringContacts =
+            private new (slots, lookup, currentSlot) =
+                {
+                    _slots = slots
+                    _lookup = lookup
+                    _currentSlot = currentSlot
+                }
+            
+            val private _slots: PooledList<int64>[]
+            val private _lookup: PooledDictionary<int64, int>
+            val mutable private _currentSlot: int
+
+            static member Create() =
+                let slots = Array.init (CONTACT_TTL + 1) (fun _ -> new PooledList<int64>())
+                let lookup = new PooledDictionary<int64, int>()
+                new ExpiringContacts(slots, lookup, 0)
+            
+            member this.Count = this._lookup.Count
+            member this.Clear() =
+                this._lookup.Clear()
+                this._slots |> Seq.iter _.Clear()
+
+            member this.AddOrUpdate(key, ttl) =
+                let newTtl = min CONTACT_TTL (max 1 ttl)
+                let newSlot = (this._currentSlot + newTtl) % this._slots.Length
+
+                match this._lookup.TryGetValue key with
+                | true, oldSlot ->
+                    if oldSlot <> newSlot then
+                        this._slots[oldSlot].Remove key |> ignore
+                        this._slots[newSlot].Add key
+                        this._lookup[key] <- newSlot
+                | false, _ ->
+                    this._slots[newSlot].Add key
+                    this._lookup.Add(key, newSlot)
+
+            member this.Remove key =
+                match this._lookup.TryGetValue key with
+                | true, slot ->
+                    this._lookup.Remove key |> ignore
+                    this._slots[slot].Remove key |> ignore
+                    true
+                | _ -> false
+
+            member this.NextStep() =
+                this._currentSlot <- (this._currentSlot + 1) % this._slots.Length
+                let expiringNow = this._slots[this._currentSlot]
+                if expiringNow.Count > 0 then
+                    for key in expiringNow.Span do
+                        this._lookup.Remove key |> ignore
+                    expiringNow.Clear()
+
+            member this.GetKeys() = this._lookup.Keys :> ICollection<_>
+
+            member this.GetAllContacts() =
+                let result = new PooledList<struct(int64*int)>()
+                for slotIndex = 0 to this._slots.Length - 1 do
+                    let ttl = (slotIndex - this._currentSlot + this._slots.Length) % this._slots.Length
+                    if ttl > 0 then
+                        let slot = this._slots[slotIndex]
+                        for key in slot.Span do
+                            result.Add(struct(key, ttl))
+                result
+
+            member this.Dispose() =
+                this._lookup |> Dispose.action
+                for list in this._slots do
+                    list |> Dispose.action
+            interface IDisposable with
+                member this.Dispose() = this.Dispose()
+                
+        [<Sealed>]
         type T =
             new(id: int64) =
                 {
                     Id = id
                     Bodies = new PooledSet<_>()
-                    ContactTTL = new PooledDictionary<_, _>()
+                    ContactTTL = ExpiringContacts.Create()
                     IsAwake = true
                     FramesResting = 0
                     CantSleepFrames = 2
                     IsSlow = false
-                    _updateBuffer = new PooledList<_>()
-                    _removeBuffer = new PooledList<_>()
                 }
             val Id: int64
             val Bodies: PooledSet<int>
-            val mutable ContactTTL : PooledDictionary<int64, int>
+            val ContactTTL : ExpiringContacts
             val mutable IsAwake : bool
             val mutable FramesResting : int
             val mutable CantSleepFrames : int
             val mutable IsSlow : bool
-            val private _updateBuffer : PooledList<struct(int64 * int)>
-            val private _removeBuffer : PooledList<int64>
-            
+
             member this.NextStep() =
                 if this.IsSlow then
-                    for kvp in this.ContactTTL do
-                        if kvp.Value <= 1 then
-                            this._removeBuffer.Add kvp.Key
-                        else
-                            this._updateBuffer.Add(struct(kvp.Key, kvp.Value - 1))
-
-                    for key in this._removeBuffer.Span do
-                        this.ContactTTL.Remove key |> ignore
-                    for struct(key, value) in this._updateBuffer.Span do
-                        this.ContactTTL[key] <- value
+                    this.ContactTTL.NextStep()
                     
-                    this._updateBuffer.Clear()
-                    this._removeBuffer.Clear()
             member this.Dispose() =
                 this.Bodies |> Dispose.action
                 this.ContactTTL |> Dispose.action
-                this._updateBuffer |> Dispose.action
-                this._removeBuffer |> Dispose.action
+                
             interface IDisposable with
                 member this.Dispose() = this.Dispose()
                 
@@ -1573,14 +1634,14 @@ module Engine =
 
         let private buildAdjacencyMap
             (bodies: ICollection<int>)
-            (contacts: IDictionary<int64, 'a>)
+            (contactKeys: ICollection<int64>)
             =
             
             let adjacencyMap = new PooledDictionary<int, PooledList<int>>()
             for bodyId in bodies do
                 adjacencyMap.Add(bodyId, new PooledList<int>())
 
-            for contactKey in contacts.Keys do
+            for contactKey in contactKeys do
                 let struct(id1, id2) = contactKey |> ContactKey.unpack
                 match adjacencyMap.TryGetValue id1 with
                 | true, a1 ->
@@ -1617,9 +1678,9 @@ module Engine =
             
         let private findConnectedComponents
             (bodiesToAnalyze: ICollection<int>)
-            (contacts: IDictionary<int64, int>) =
+            (contacts: ExpiringContacts) =
                 
-            use adjacencyMap = buildAdjacencyMap bodiesToAnalyze contacts
+            use adjacencyMap = buildAdjacencyMap bodiesToAnalyze (contacts.GetKeys())
             let result = new PooledList<PooledList<int>>()
             use visited = new PooledSet<int>()
 
@@ -1696,7 +1757,7 @@ module Engine =
                 elif anchors.Count = island.Bodies.Count then
                     true
                 else
-                    use adjacencyMap = buildAdjacencyMap island.Bodies island.ContactTTL
+                    use adjacencyMap = buildAdjacencyMap island.Bodies (island.ContactTTL.GetKeys())
                     use visited = new PooledSet<int>()
                     use queue = new PooledQueue<int>()
                     
@@ -1720,12 +1781,13 @@ module Engine =
                     isGrounded
                 
                 
-        let getIslandRefForBody bodyId r =
-            &CollectionsMarshal.GetValueRefOrNullRef(r._allIslands, r._bodyToIslandMap[bodyId])
-            
-        let getIslandRef islandId r =
-            &CollectionsMarshal.GetValueRefOrNullRef(r._allIslands, islandId)
-            
+        let getIslandForBody bodyId r = r._allIslands[r._bodyToIslandMap[bodyId]]
+        let getIsland islandId r = r._allIslands[islandId]
+        let tryGetIsland islandId r =
+            match r._allIslands.TryGetValue islandId with
+            | true, island -> island |> ValueSome
+            | _ -> ValueNone
+        
         let addBody bodyId r=
             let mutable isFound = false
             let islandId = &CollectionsMarshal.GetValueRefOrAddDefault(r._bodyToIslandMap, bodyId, &isFound)
@@ -1741,7 +1803,7 @@ module Engine =
             if r._bodyToIslandMap.TryGetValue(bodyId, &islandId) then
                 r._bodyToIslandMap.Remove bodyId |> ignore
                 
-                let island = &CollectionsMarshal.GetValueRefOrNullRef(r._allIslands, islandId)
+                let island = r |> getIsland islandId
                 if not <| Unsafe.IsNullRef &island then
                     island.Bodies.Remove bodyId |> ignore
                     if island.Bodies.Count = 0 then
@@ -1749,18 +1811,15 @@ module Engine =
                            r._removeIslandsBuffer.Add islandId
         
         let requestWakeIsland islandId r =
-            let island = &getIslandRef islandId r
+            let island = r |> getIsland islandId
             island.FramesResting <- 0
             if not island.IsAwake && r._islandsToWake.Add island.Id then
                 r._logger.Information("Request wake island: {IslandId}", islandId)
-
-        let islandMerge sourceId targetId r =  
-            let sourceIsland = &CollectionsMarshal.GetValueRefOrNullRef(r._allIslands, sourceId)
-            let targetIsland = &CollectionsMarshal.GetValueRefOrNullRef(r._allIslands, targetId)
-
-            if sourceId <> targetId
-               && not (Unsafe.IsNullRef &sourceIsland)
-               && not (Unsafe.IsNullRef &targetIsland) then
+            
+        let islandMerge sourceId targetId r =
+            if sourceId <> targetId then
+                match r |> tryGetIsland sourceId, r |> tryGetIsland targetId with
+                | ValueSome sourceIsland, ValueSome targetIsland ->
                     targetIsland.CantSleepFrames <- max sourceIsland.CantSleepFrames targetIsland.CantSleepFrames
                     targetIsland.FramesResting <- 0
  
@@ -1769,20 +1828,20 @@ module Engine =
                         targetIsland.Bodies.Add bodyId |> ignore
                         r._bodyToIslandMap[bodyId] <- targetId
 
-                    for kvp in sourceIsland.ContactTTL do
-                        match targetIsland.ContactTTL.TryGetValue kvp.Key with
-                        | true, existingTTL -> targetIsland.ContactTTL[kvp.Key] <- max kvp.Value existingTTL
-                        | false, _ -> targetIsland.ContactTTL.Add(kvp.Key, kvp.Value)
+                    use contactsToMove = sourceIsland.ContactTTL.GetAllContacts()
+                    for struct(key, ttl) in contactsToMove.Span do
+                        targetIsland.ContactTTL.AddOrUpdate(key, ttl)
 
                     sourceIsland |> Dispose.action
                     if not <| r._removeIslandsBuffer.Contains sourceId then
                        r._removeIslandsBuffer.Add sourceId
-
+                | _ -> ()
+                
         let requestSleep islandId r =
-            let island = &getIslandRef islandId r
+            let island = r |> getIsland islandId
             if island.IsAwake && r._islandsToSleep.Add island.Id then
                 r._logger.Information("Request sleep island: {IslandId}", islandId)
-        
+            
         let requestMerge id1 id2 r =
             if id1 <> id2 then
                 let inline findRoot (islandId: int64) =
@@ -1799,10 +1858,8 @@ module Engine =
                     r |> requestWakeIsland root1
                     r |> requestWakeIsland root2
                     
-                    let island1 = &CollectionsMarshal.GetValueRefOrNullRef(r._allIslands, root1)
-                    let island2 = &CollectionsMarshal.GetValueRefOrNullRef(r._allIslands, root2)
-
-                    if not <| Unsafe.IsNullRef &island1 && not <| Unsafe.IsNullRef &island2 then
+                    match r |> tryGetIsland root1, r |> tryGetIsland root2 with
+                    | ValueSome island1, ValueSome island2 ->
                         let struct(sourceRoot, targetRoot) =
                             if island1.Bodies.Count < island2.Bodies.Count then
                                 (root1, root2)
@@ -1821,7 +1878,8 @@ module Engine =
                             r._islandsToMerge.Enqueue pair
 
                             r._mergeRedirects[sourceRoot] <- targetRoot
-            
+                    | _ -> ()
+                    
         let requestSplit islandId r =
             if r._islandsToSplit.Add islandId then
                 r._logger.Information("Request split island: {IslandId}", islandId)
@@ -1831,29 +1889,29 @@ module Engine =
             r._mergeRedirects.Clear()
 
             for islandId in r._islandsToWake do
-                let island = &CollectionsMarshal.GetValueRefOrNullRef(r._allIslands, islandId)
-                if Unsafe.IsNullRef &island then
-                    r._removeIslandsBuffer.Add islandId
-                elif island.Bodies.Count = 0 then
-                    r._removeIslandsBuffer.Add island.Id
-                    island |> Dispose.action
-                elif not island.IsAwake then
-                    island.IsAwake <- true
-                    island.FramesResting <- 0
+                match r |> tryGetIsland islandId with
+                | ValueNone -> r._removeIslandsBuffer.Add islandId
+                | ValueSome island ->
+                    if island.Bodies.Count = 0 then
+                        r._removeIslandsBuffer.Add island.Id
+                        island |> Dispose.action
+                    elif not island.IsAwake then
+                        island.IsAwake <- true
+                        island.FramesResting <- 0
 
-                    // It is strictly forbidden to erase ContactTTL,
-                    // because any awakened island must remember all its contacts, so as not to
-                    // start the tedious and expensive procedure of assembling back into the island again
-                    // island.ContactTTL.Clear()
-                    
-                    for bodyId in island.Bodies do
-                        r._sleepingHash |> SpatialHash.removeBody bodyId
-                        let body = &Body.getRef bodyId r._bodyRepo
-                        if not <| Unsafe.IsNullRef &body then
-                            SpatialHash.add &body buffers r._activeHash
-                            
-                    r._sleepingIslandIds.Remove island.Id |> ignore
-                    r._activeIslandIds.Add island.Id |> ignore
+                        // It is strictly forbidden to erase ContactTTL,
+                        // because any awakened island must remember all its contacts, so as not to
+                        // start the tedious and expensive procedure of assembling back into the island again
+                        // island.ContactTTL.Clear()
+                        
+                        for bodyId in island.Bodies do
+                            r._sleepingHash |> SpatialHash.removeBody bodyId
+                            let body = &Body.getRef bodyId r._bodyRepo
+                            if not <| Unsafe.IsNullRef &body then
+                                SpatialHash.add &body buffers r._activeHash
+                                
+                        r._sleepingIslandIds.Remove island.Id |> ignore
+                        r._activeIslandIds.Add island.Id |> ignore
             r._islandsToWake.Clear()
 
             while r._islandsToMerge.Count > 0 do
@@ -1862,8 +1920,8 @@ module Engine =
             r._islandsToMergePairs.Clear()
 
             for islandIdToSplit in r._islandsToSplit do
-                let originalIsland = &CollectionsMarshal.GetValueRefOrNullRef(r._allIslands, islandIdToSplit)
-                if not <| Unsafe.IsNullRef &originalIsland then
+                match r |> tryGetIsland islandIdToSplit with
+                | ValueSome originalIsland ->
                     use components = findConnectedComponents originalIsland.Bodies originalIsland.ContactTTL
 
                     if components.Count <= 1 then
@@ -1893,12 +1951,13 @@ module Engine =
                                     originalIsland.Bodies.Remove bodyId |> ignore
                                     r._bodyToIslandMap[bodyId] <- newFragmentIsland.Id
 
-                                for contactKey in originalIsland.ContactTTL.Keys do
+                                for contactKey in originalIsland.ContactTTL.GetKeys() do
                                     let struct(id1, id2) = ContactKey.unpack contactKey
                                     if newFragmentIsland.Bodies.Contains id1 && newFragmentIsland.Bodies.Contains id2 then
-                                       newFragmentIsland.ContactTTL.Add(contactKey, originalIsland.ContactTTL[contactKey])
+                                       newFragmentIsland.ContactTTL.AddOrUpdate(contactKey, CONTACT_TTL)
+                                       
                         use contactsToRemove = new PooledList<int64>()
-                        for contactKey in originalIsland.ContactTTL.Keys do
+                        for contactKey in originalIsland.ContactTTL.GetKeys() do
                             let struct(id1, id2) = ContactKey.unpack contactKey
                             if not <| originalIsland.Bodies.Contains id1 || not <| originalIsland.Bodies.Contains id2 then
                                 contactsToRemove.Add contactKey
@@ -1907,42 +1966,44 @@ module Engine =
                             originalIsland.ContactTTL.Remove key |> ignore
 
                         components |> Seq.iter Dispose.action
-
+                | ValueNone -> ()
+                
             r._islandsToSplit.Clear()
 
             for islandId in r._islandsToSleep do
-                if r._activeIslandIds.Contains(islandId) then
-                    let island = &CollectionsMarshal.GetValueRefOrNullRef(r._allIslands, islandId)
-
-                    if Unsafe.IsNullRef &island then
-                        if not <| r._removeIslandsBuffer.Contains islandId then
-                            r._removeIslandsBuffer.Add islandId
-                    elif island.Bodies.Count = 0 then
-                        if not <| r._removeIslandsBuffer.Contains islandId then
-                            r._removeIslandsBuffer.Add islandId
-                        island |> Dispose.action
-                        
-                    elif island.IsAwake then
-                        let mutable isStillEligibleForSleep = true
-                        let mutable enumerator = island.Bodies.GetEnumerator()
-                        while isStillEligibleForSleep && enumerator.MoveNext() do
-                            let bodyId = enumerator.Current
-                            let body = &Body.getRef bodyId r._bodyRepo
-                            if not <| Unsafe.IsNullRef &body && body.Velocity.MagnitudeSq() >= SLEEP_VELOCITY_THRESHOLD_SQ then
-                                isStillEligibleForSleep <- false
-                        
-                        if isStillEligibleForSleep then
-                            island.IsAwake <- false
-                            for bodyId in island.Bodies do
-                                r._activeHash |> SpatialHash.removeBody bodyId
+                if r._activeIslandIds.Contains islandId then
+                    match r |> tryGetIsland islandId with
+                    | ValueSome island ->
+                        if island.Bodies.Count = 0 then
+                            if not <| r._removeIslandsBuffer.Contains islandId then
+                                r._removeIslandsBuffer.Add islandId
+                            island |> Dispose.action
+                            
+                        elif island.IsAwake then
+                            let mutable isStillEligibleForSleep = true
+                            let mutable enumerator = island.Bodies.GetEnumerator()
+                            while isStillEligibleForSleep && enumerator.MoveNext() do
+                                let bodyId = enumerator.Current
                                 let body = &Body.getRef bodyId r._bodyRepo
-                                if not <| Unsafe.IsNullRef &body then
-                                    body.Velocity <- Vector3.Zero
-                                    SpatialHash.add &body buffers r._sleepingHash
-                            r._activeIslandIds.Remove island.Id |> ignore
-                            r._sleepingIslandIds.Add island.Id |> ignore
-                        else
-                            island.FramesResting <- 0
+                                if not <| Unsafe.IsNullRef &body && body.Velocity.MagnitudeSq() >= SLEEP_VELOCITY_THRESHOLD_SQ then
+                                    isStillEligibleForSleep <- false
+                            
+                            if isStillEligibleForSleep then
+                                island.IsAwake <- false
+                                for bodyId in island.Bodies do
+                                    r._activeHash |> SpatialHash.removeBody bodyId
+                                    let body = &Body.getRef bodyId r._bodyRepo
+                                    if not <| Unsafe.IsNullRef &body then
+                                        body.Velocity <- Vector3.Zero
+                                        SpatialHash.add &body buffers r._sleepingHash
+                                r._activeIslandIds.Remove island.Id |> ignore
+                                r._sleepingIslandIds.Add island.Id |> ignore
+                            else
+                                island.FramesResting <- 0
+                    | ValueNone ->
+                        if not <| r._removeIslandsBuffer.Contains islandId then
+                            r._removeIslandsBuffer.Add islandId
+                            
             r._islandsToSleep.Clear()
 
             for island in r._allIslands.Values do
@@ -2438,7 +2499,7 @@ module Engine =
                             otherBody.Orientation
                     
                     if result.AreColliding then
-                        let otherIsland = &Island.getIslandRefForBody dynamicBodyId islandRepo
+                        let otherIsland = islandRepo |> Island.getIslandForBody dynamicBodyId
                         islandRepo |> Island.requestWakeIsland otherIsland.Id
 
                         // Считаем коллизию, где у кинематического тела инвертированная масса равна 0,
@@ -2492,7 +2553,7 @@ module Engine =
 
                         WorldLimits.wrapPosition &otherBody.Position
 
-                        let island = &Island.getIslandRefForBody otherId islandRepo
+                        let island = islandRepo |> Island.getIslandForBody otherId
                         islandRepo |> Island.requestWakeIsland island.Id
         
         let private applyKinematicUpdates sub_dt engine =
@@ -2507,7 +2568,7 @@ module Engine =
             use bodiesToInitiateFall = new PooledList<int>()
             let activeIslands = islandRepo |> Island.getActiveIslandIds
             for islandId in activeIslands do
-                let island = &Island.getIslandRef islandId islandRepo
+                let island = islandRepo |> Island.getIsland islandId
                 for id in island.Bodies do
                     let body = &Body.getRef id bodyRepo
                     if not <| Unsafe.IsNullRef &body && body.IsForceFalling && not body.IsFallingOver then
@@ -2516,7 +2577,7 @@ module Engine =
             for id in bodiesToInitiateFall.Span do
                 let body = &Body.getRef id bodyRepo
                 if not <| Unsafe.IsNullRef &body then
-                    let island = &Island.getIslandRefForBody body.Id islandRepo
+                    let island = islandRepo |> Island.getIslandForBody body.Id
                     islandRepo |> Island.requestWakeIsland island.Id
                     
                     body.IsFallingOver <- true
@@ -2525,7 +2586,7 @@ module Engine =
                     body.IsForceFalling <- false
 
             for islandId in activeIslands do
-                let island = &Island.getIslandRef islandId islandRepo
+                let island = islandRepo |> Island.getIsland islandId
                 for id in island.Bodies do
                     let body = &Body.getRef id bodyRepo
                     if not <| Unsafe.IsNullRef &body && body.IsFallingOver then                
@@ -2756,25 +2817,26 @@ module Engine =
                                                 
                     resolveDynamicFriction &b1 &b2 finalNormal totalImpulseScalar b1.InvMass b2.InvMass dt
 
-                    let island1_ref = &Island.getIslandRefForBody b1.Id islandRepo
-                    let island2_ref = &Island.getIslandRefForBody b2.Id islandRepo
+                    let island1_ref = islandRepo |> Island.getIslandForBody b1.Id
+                    let island2_ref = islandRepo |> Island.getIslandForBody b2.Id
                                         
                     if island1_ref.Id <> island2_ref.Id then
                         islandRepo |> Island.requestMerge island1_ref.Id island2_ref.Id
                                                         
                     let contactKey = ContactKey.key b1.Id b2.Id
-                    island1_ref.ContactTTL[contactKey] <- CONTACT_TTL
-                    island2_ref.ContactTTL[contactKey] <- CONTACT_TTL
+                    island1_ref.ContactTTL.AddOrUpdate(contactKey, CONTACT_TTL)
+                    if island1_ref.Id <> island2_ref.Id then
+                        island2_ref.ContactTTL.AddOrUpdate(contactKey, CONTACT_TTL)
 
                     b1.IsSnappedToGrid <- false
                     b2.IsSnappedToGrid <- false
             elif checkBodyProximity minA maxA minB maxB then
-                let island1_ref = &Island.getIslandRefForBody b1.Id islandRepo
-                let island2_ref = &Island.getIslandRefForBody b2.Id islandRepo
+                let island1_ref = islandRepo |> Island.getIslandForBody b1.Id
+                let island2_ref = islandRepo |> Island.getIslandForBody b2.Id 
 
                 if island1_ref.Id = island2_ref.Id then
                     let contactKey = ContactKey.key b1.Id b2.Id
-                    island1_ref.ContactTTL[contactKey] <- CONTACT_TTL
+                    island1_ref.ContactTTL.AddOrUpdate(contactKey, CONTACT_TTL)
 
         let private resolveDynamicSleepingCollision
             (b1: byref<Body.T>)
@@ -2803,15 +2865,15 @@ module Engine =
                                                     
                     resolveDynamicFriction &b1 &b2_sleeping finalNormal totalImpulseScalar b1.InvMass b2_sleeping.InvMass dt
                                                     
-                    let island1_ref = &Island.getIslandRefForBody b1.Id islandRepo
-                    let island2_sleeping = &Island.getIslandRefForBody b2_sleeping.Id islandRepo
+                    let island1_ref = islandRepo |> Island.getIslandForBody b1.Id
+                    let island2_sleeping = islandRepo |> Island.getIslandForBody b2_sleeping.Id
                                                     
                     islandRepo |> Island.requestWakeIsland island2_sleeping.Id
                     islandRepo |> Island.requestMerge island2_sleeping.Id island1_ref.Id
 
                     let contactKey = ContactKey.key b1.Id b2_sleeping.Id
-                    island1_ref.ContactTTL[contactKey] <- CONTACT_TTL
-                    island2_sleeping.ContactTTL[contactKey] <- CONTACT_TTL
+                    island1_ref.ContactTTL.AddOrUpdate(contactKey, CONTACT_TTL)
+                    island2_sleeping.ContactTTL.AddOrUpdate(contactKey, CONTACT_TTL)
 
                     b1.IsSnappedToGrid <- false
                     b2_sleeping.IsSnappedToGrid <- false
@@ -2909,7 +2971,7 @@ module Engine =
             use processedFloraPartners = new PooledSet<int>()
                         
             for islandId in islandRepo |> Island.getActiveIslandIds do
-                let island = &Island.getIslandRef islandId islandRepo
+                let island = islandRepo |> Island.getIsland islandId
                 for id1 in island.Bodies do
                     let b1 = &Body.getRef id1 bodyRepo
                     if not <| Unsafe.IsNullRef &b1 then
@@ -2962,9 +3024,10 @@ module Engine =
             let sleepingHash = engine._sleepingHash
             let dt = engine._dt
             let geometryRepo = engine._geometryRepo
+            use processedBushes = new PooledSet<int>()
             
             for islandId in islandRepo |> Island.getActiveIslandIds do
-                let island = &Island.getIslandRef islandId islandRepo
+                let island = islandRepo |> Island.getIsland islandId
                 if island.IsAwake then
                     if island.Bodies.Count > 1 && island.ContactTTL.Count < island.Bodies.Count - 1 then
                         islandRepo |> Island.requestSplit island.Id
@@ -2974,12 +3037,17 @@ module Engine =
                         let bodyId = enumerator.Current
                         let body = &Body.getRef bodyId bodyRepo
                         if not <| Unsafe.IsNullRef &body then
+                            processedBushes.Clear()
                             for pCoords in SpatialHash.getOccupiedCells bodyId activeHash do
                                 match floraRepo |> Flora.tryGetBushesInCell pCoords with
                                 | true, bushIds ->
                                     for bushId in bushIds.Span do
-                                        Flora.applyBushFriction &body bushId dt floraRepo
-                                | _ -> ()                                
+                                        processedBushes.Add bushId |> ignore
+                                | _ -> ()
+
+                            for bushId in processedBushes do
+                                Flora.applyBushFriction &body bushId dt floraRepo
+                                
                             let mSq = body.Velocity.MagnitudeSq()
                             if (mSq >= SLEEP_VELOCITY_THRESHOLD_SQ || body.IsFallingOver) then
                                 isStillSlow <- false
@@ -3086,7 +3154,7 @@ module Engine =
             engine._buffers.Clear()
 
             for islandId in engine._islandRepo.ActiveIslandIds do
-                let mutable island = &Island.getIslandRef islandId engine._islandRepo
+                let island = engine._islandRepo |> Island.getIsland islandId
                 island.NextStep() 
                 for bodyId in island.Bodies do
                     let body = &Body.getRef bodyId engine._bodyRepo
@@ -3109,7 +3177,7 @@ module Engine =
                 engine |> detectCollisionsAndUpdateIslands sub_dt
 
                 for islandId in engine._islandRepo.ActiveIslandIds do
-                    let island = &Island.getIslandRef islandId engine._islandRepo
+                    let island = engine._islandRepo |> Island.getIsland islandId
                     if not <| Unsafe.IsNullRef &island then
                         for bodyId in island.Bodies do
                             let body = &Body.getRef bodyId engine._bodyRepo
