@@ -2904,26 +2904,28 @@ module Engine =
             checkedBodyPairs.Clear()
             
             use destroyedThisFrame = new PooledSet<int>()
-            use checkedSleepingPartners = new PooledSet<int>()
-            use checkedStaticPartners = new PooledSet<int64>()
-
+            use processedSleepingPartners = new PooledSet<int>()
+            use processedStaticPrisms = new PooledSet<uint64>()
+            use processedFloraPartners = new PooledSet<int>()
+                        
             for islandId in islandRepo |> Island.getActiveIslandIds do
-                let islandId_ref = &Island.getIslandRef islandId islandRepo
-                for id1 in islandId_ref.Bodies do
+                let island = &Island.getIslandRef islandId islandRepo
+                for id1 in island.Bodies do
                     let b1 = &Body.getRef id1 bodyRepo
                     if not <| Unsafe.IsNullRef &b1 then
                         let invMass1 = if b1.IsFallingOver then 0.0 else b1.InvMass
-                        
+
                         resolveFloorAndCeilingCollisions &b1 invMass1 sub_dt
-                                    
-                        checkedSleepingPartners.Clear()
-                        checkedStaticPartners.Clear()
-      
+
+                        processedSleepingPartners.Clear()
+                        processedStaticPrisms.Clear()
+                        processedFloraPartners.Clear()
+
                         let occupiedCellsForBody1 = SpatialHash.getOccupiedCells id1 activeHash
                         for i = 0 to occupiedCellsForBody1.Length - 1 do
-                            let cellKey = &occupiedCellsForBody1[i]
+                            let cellKey = occupiedCellsForBody1[i]
 
-                            // Dynamic<->Dynamic
+                            // Dynamic <-> Dynamic
                             for id2 in SpatialHash.query cellKey activeHash do
                                 if id2 > id1 then
                                     let contactKey = ContactKey.key id1 id2
@@ -2932,23 +2934,23 @@ module Engine =
                                         if not <| Unsafe.IsNullRef &b2 then
                                             resolveDynamicDynamicCollision &b1 &b2 islandRepo sub_dt
 
-                            // Dynamic<->Sleeping
+                            // Dynamic <-> Sleeping
                             for sleepingId in SpatialHash.query cellKey sleepingHash do
-                                if checkedSleepingPartners.Add sleepingId then
+                                if processedSleepingPartners.Add sleepingId then
                                     let b2_sleeping = &Body.getRef sleepingId bodyRepo
                                     if not <| Unsafe.IsNullRef &b2_sleeping then
                                         resolveDynamicSleepingCollision &b1 &b2_sleeping islandRepo sub_dt
 
-                            // Dynamic<->Static Geometry
-                            if geometryRepo |> Geometry.isSolid cellKey && checkedStaticPartners.Add(cellKey |> int64) then
-                                resolveStaticGeometryCollision &b1 cellKey sub_dt
+                            // Dynamic <-> Static Geometry
+                            if geometryRepo |> Geometry.isSolid cellKey then
+                                if processedStaticPrisms.Add cellKey then
+                                    resolveStaticGeometryCollision &b1 cellKey sub_dt
 
-                            // Dynamic<->Flora
+                            // Dynamic <-> Flora
                             match floraRepo |> Flora.tryGetTreesInCell cellKey with
-                            | true, treeIds ->        
+                            | true, treeIds ->
                                 for treeId in treeIds.Span do
-                                    let staticKey = int64 -treeId
-                                    if not <| destroyedThisFrame.Contains treeId && checkedStaticPartners.Add staticKey then
+                                    if not <| destroyedThisFrame.Contains treeId && processedFloraPartners.Add treeId then
                                         resolveFloraCollision &b1 treeId floraRepo buffers destroyedThisFrame rnd sub_dt
                             | _ -> ()
 
