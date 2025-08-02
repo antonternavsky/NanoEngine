@@ -1403,12 +1403,16 @@ module Engine =
             
             let offsetFromCenterToBottom = body.Orientation * Vector3(0.0, 0.0, -body.Dimensions.Z / 2.0)
             let bodyPos = body.Position
+            let bodyHeight = body.Dimensions.Z
 
+            let halfBodyHeightInCells = int (Math.Ceiling((bodyHeight / 2.0) / HEX_HEIGHT))
+            let minZOffset = -halfBodyHeightInCells - 1
+            
             let struct(rawQ, rawR, rawZ) = bodyPos |> Grid.convertWorldToRawGridCoords
 
             use allCandidatePoints = new PooledList<struct(Vector3 * double)>()
-
-            for zOffset = -1 to 0 do
+            
+            for zOffset = minZOffset to 0 do
                 let searchCoords = SubPrismCoords.Normalize(rawQ, rawR, rawZ + zOffset, 0)
                 getSnapPointsForHex searchCoords buffers.SnapPointsBuffer
 
