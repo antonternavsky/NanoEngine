@@ -1469,7 +1469,7 @@ module Engine =
     [<RequireQualifiedAccess>]
     module Island =
         
-        [<Struct>]
+        [<Struct; IsReadOnly>]
         type ExpiringContacts =
             private new (slots, lookup, currentSlot) =
                 {
@@ -1480,7 +1480,7 @@ module Engine =
             
             val private _slots: PooledList<int64>[]
             val private _lookup: PooledDictionary<int64, int>
-            val mutable private _currentSlot: int
+            val private _currentSlot: int
 
             static member Create() =
                 let slots = Array.init (CONTACT_TTL + 1) (fun _ -> new PooledList<int64>())
@@ -1515,13 +1515,13 @@ module Engine =
                 | _ -> false
 
             member this.NextStep() =
-                this._currentSlot <- (this._currentSlot + 1) % this._slots.Length
-                let expiringNow = this._slots[this._currentSlot]
+                let newCurrentSlot = (this._currentSlot + 1) % this._slots.Length
+                let expiringNow = this._slots[newCurrentSlot]
                 if expiringNow.Count > 0 then
                     for key in expiringNow.Span do
                         this._lookup.Remove key |> ignore
                     expiringNow.Clear()
-                this
+                new ExpiringContacts(this._slots, this._lookup, newCurrentSlot)
                 
             member this.GetKeys() = this._lookup.Keys :> ICollection<_>
 
