@@ -1402,66 +1402,60 @@ module Engine =
             buffers =
             
             let offsetFromCenterToBottom = body.Orientation * Vector3(0.0, 0.0, -body.Dimensions.Z / 2.0)
-            use validCandidates = new PooledList<Vector3>()
+            let bodyPos = body.Position
 
-            let struct(rawQ, rawR, rawZ) = body.Position |> Grid.convertWorldToRawGridCoords
-            
-            for qOffset = -1 to 1 do
-                for rOffset = -1 to 1 do
-                    for zOffset = -1 to 0 do
-                        let searchCoords = SubPrismCoords.Normalize(rawQ + qOffset, rawR + rOffset, rawZ + zOffset, 0)
-                        getSnapPointsForHex searchCoords buffers.SnapPointsBuffer
+            let struct(rawQ, rawR, rawZ) = bodyPos |> Grid.convertWorldToRawGridCoords
 
-                        for point in buffers.SnapPointsBuffer.Span do
-                            let wrappedPointX = WorldLimits.wrapX point.X
-                            let wrappedPointY = WorldLimits.wrapY point.Y
-                            let wrappedPoint = Vector3(wrappedPointX, wrappedPointY, point.Z)
+            use allCandidatePoints = new PooledList<struct(Vector3 * double)>()
 
-                            if geometryRepo |> Geometry.hasSupportBeneath wrappedPoint then
-                                let candidateBodyCenter = wrappedPoint - offsetFromCenterToBottom
-                                if isTargetPositionFree
-                                    body.Id
-                                    candidateBodyCenter
-                                    body.Dimensions
-                                    body.Orientation
-                                    bodyRepo
-                                    activeHash
-                                    sleepingHash
-                                    geometryRepo
-                                    buffers.UniquePrismsFilterBuffer
-                                    buffers.UniquePrismsBuffer then
-                                    validCandidates.Add candidateBodyCenter
+            for zOffset = -1 to 0 do
+                let searchCoords = SubPrismCoords.Normalize(rawQ, rawR, rawZ + zOffset, 0)
+                getSnapPointsForHex searchCoords buffers.SnapPointsBuffer
 
-            if validCandidates.Count > 0 then
-                let mutable bestPoint = Vector3.Zero
-                let mutable minDistSq = Double.MaxValue
-                let mutable foundBest = false
+                for point in buffers.SnapPointsBuffer.Span do
+                    let wrappedPointX = WorldLimits.wrapX point.X
+                    let wrappedPointY = WorldLimits.wrapY point.Y
+                    let wrappedPoint = Vector3(wrappedPointX, wrappedPointY, point.Z)
 
-                let bodyPos = body.Position
-
-                for i = 0 to validCandidates.Count - 1 do
-                    let candidate = validCandidates[i]
-
-                    let deltaX = WorldLimits.relativeX (candidate.X - bodyPos.X)
-                    let deltaY = WorldLimits.relativeY (candidate.Y - bodyPos.Y)
-                    let deltaZ = candidate.Z - bodyPos.Z
+                    let deltaX = WorldLimits.relativeX (wrappedPoint.X - bodyPos.X)
+                    let deltaY = WorldLimits.relativeY (wrappedPoint.Y - bodyPos.Y)
+                    let deltaZ = wrappedPoint.Z - bodyPos.Z
                     
                     let distSq = deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ
+                    
+                    allCandidatePoints.Add(struct(wrappedPoint, distSq))
 
-                    if distSq < minDistSq then
-                        minDistSq <- distSq
-                        bestPoint <- candidate
-                        foundBest <- true
+            allCandidatePoints.Sort(fun (struct(_, distA)) (struct(_, distB)) -> distA.CompareTo(distB))
+            
+            let mutable isFoundSnapPoint = false
+            let mutable i = 0
+            let allCandidatePoints = allCandidatePoints.Span
+            while not isFoundSnapPoint && i < allCandidatePoints.Length do
+                let struct(point, _) = allCandidatePoints[i]
+                
+                if geometryRepo |> Geometry.hasSupportBeneath point then
+                    let candidateBodyCenter = point - offsetFromCenterToBottom
+                    
+                    if isTargetPositionFree
+                        body.Id
+                        candidateBodyCenter
+                        body.Dimensions
+                        body.Orientation
+                        bodyRepo
+                        activeHash
+                        sleepingHash
+                        geometryRepo
+                        buffers.UniquePrismsFilterBuffer
+                        buffers.UniquePrismsBuffer 
+                    then
+                        body.Position <- candidateBodyCenter
+                        body.Velocity <- Vector3.Zero
+                        body.IsSnappedToGrid <- true
+                        isFoundSnapPoint <- true
 
-                if foundBest then
-                    body.Position <- bestPoint
-                    body.Velocity <- Vector3.Zero
-                    body.IsSnappedToGrid <- true
-                    true
-                else
-                    false
-            else
-                false
+                i <- i + 1
+
+            isFoundSnapPoint
 
     [<RequireQualifiedAccess>]
     module Island =
