@@ -69,8 +69,8 @@ module Tests =
 
         member _.State with get() = _state and set v = _state <- v
         member _.GetBody id = &Body.getRef id _state.BodyRepo
-        member _.GetIsland islandId = _state.IslandRepo |> Island.getIsland islandId
-        member _.GetIslandRefForBody bodyId = _state.IslandRepo |> Island.getIslandForBody bodyId
+        member _.GetIsland islandId = &Island.getIslandRef islandId _state.IslandRepo
+        member _.GetIslandRefForBody bodyId = &Island.getIslandRefForBody bodyId _state.IslandRepo
         member _.Memoize(key, value) = _state.Memo[key] <- box value
         member _.Recall<'T>(key) = unbox<'T> _state.Memo[key]
 
