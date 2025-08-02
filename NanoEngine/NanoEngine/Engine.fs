@@ -487,18 +487,12 @@ module Engine =
 
         let getTriangularPrismCenter (coords: SubPrismCoords)=
             let hexCenter = convertHexToWorld coords.Q coords.R 0 0.0
-            let hexVertices : Span<Vector3> = Stack.alloc 6
-            hexVertices[0] <- hexCenter + _vertexes[0]
-            hexVertices[1] <- hexCenter + _vertexes[1]
-            hexVertices[2] <- hexCenter + _vertexes[2]
-            hexVertices[3] <- hexCenter + _vertexes[3]
-            hexVertices[4] <- hexCenter + _vertexes[4]
-            hexVertices[5] <- hexCenter + _vertexes[5]
-
             let sector = coords.SubIndex % 6
+
             let v1 = hexCenter
-            let v2 = hexVertices[sector]
-            let v3 = hexVertices[(sector + 1) % 6]
+            let v2 = hexCenter + _vertexes[sector]
+            let v3 = hexCenter + _vertexes[(sector + 1) % 6]
+
             let baseCenter = (v1 + v2 + v3) / 3.0
             let zPos = HEX_HEIGHT * (double coords.Z + (if coords.SubIndex < 6 then 0.25 else 0.75))
 
@@ -1802,11 +1796,10 @@ module Engine =
                 r._bodyToIslandMap.Remove bodyId |> ignore
                 
                 let island = &getIslandRef islandId r
-                if not <| Unsafe.IsNullRef &island then
-                    island.Bodies.Remove bodyId |> ignore
-                    if island.Bodies.Count = 0 then
-                        if not <| r._removeIslandsBuffer.Contains islandId then
-                           r._removeIslandsBuffer.Add islandId
+                island.Bodies.Remove bodyId |> ignore
+                if island.Bodies.Count = 0 then
+                    if not <| r._removeIslandsBuffer.Contains islandId then
+                       r._removeIslandsBuffer.Add islandId
         
         let requestWakeIsland (island: byref<T>) r =
             island.FramesResting <- 0
