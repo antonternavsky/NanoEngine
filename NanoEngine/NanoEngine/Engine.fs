@@ -123,20 +123,23 @@ module Engine =
         static member inline (*)(m: Matrix3x3, v) = m.Transform(v)
 
         static member inline (*)(m1: Matrix3x3, m2: Matrix3x3) =
-            let m2C0 = Vector3(m2.R0.X, m2.R1.X, m2.R2.X)
-            let m2C1 = Vector3(m2.R0.Y, m2.R1.Y, m2.R2.Y)
-            let m2C2 = Vector3(m2.R0.Z, m2.R1.Z, m2.R2.Z)
+            let r0x = m1.R0.X * m2.R0.X + m1.R0.Y * m2.R1.X + m1.R0.Z * m2.R2.X
+            let r0y = m1.R0.X * m2.R0.Y + m1.R0.Y * m2.R1.Y + m1.R0.Z * m2.R2.Y
+            let r0z = m1.R0.X * m2.R0.Z + m1.R0.Y * m2.R1.Z + m1.R0.Z * m2.R2.Z
 
-            let R0_res =
-                Vector3(Vector3.Dot(m1.R0, m2C0), Vector3.Dot(m1.R0, m2C1), Vector3.Dot(m1.R0, m2C2))
+            let r1x = m1.R1.X * m2.R0.X + m1.R1.Y * m2.R1.X + m1.R1.Z * m2.R2.X
+            let r1y = m1.R1.X * m2.R0.Y + m1.R1.Y * m2.R1.Y + m1.R1.Z * m2.R2.Y
+            let r1z = m1.R1.X * m2.R0.Z + m1.R1.Y * m2.R1.Z + m1.R1.Z * m2.R2.Z
 
-            let R1_res =
-                Vector3(Vector3.Dot(m1.R1, m2C0), Vector3.Dot(m1.R1, m2C1), Vector3.Dot(m1.R1, m2C2))
+            let r2x = m1.R2.X * m2.R0.X + m1.R2.Y * m2.R1.X + m1.R2.Z * m2.R2.X
+            let r2y = m1.R2.X * m2.R0.Y + m1.R2.Y * m2.R1.Y + m1.R2.Z * m2.R2.Y
+            let r2z = m1.R2.X * m2.R0.Z + m1.R2.Y * m2.R1.Z + m1.R2.Z * m2.R2.Z
 
-            let R2_res =
-                Vector3(Vector3.Dot(m1.R2, m2C0), Vector3.Dot(m1.R2, m2C1), Vector3.Dot(m1.R2, m2C2))
-
-            Matrix3x3(R0_res, R1_res, R2_res)
+            Matrix3x3(
+                Vector3(r0x, r0y, r0z),
+                Vector3(r1x, r1y, r1z),
+                Vector3(r2x, r2y, r2z)
+            )
 
         static member inline CreateRotation(axis: Vector3, angle: double) =
             if Double.IsNaN angle then
@@ -213,8 +216,7 @@ module Engine =
                 wrap q GRID_WIDTH_Q,
                 wrap r GRID_DEPTH_R,
                 Math.Clamp(z, 0, GRID_HEIGHT_Z - 1),
-                i
-            )
+                i)
 
     [<RequireQualifiedAccess>]
     module SubPrismKey =
@@ -765,7 +767,33 @@ module Engine =
                 else
                     axisOverlaps minA.Y maxA.Y minB.Y maxB.Y WorldLimits.Y
 
-        let checkCollisionSAT(p1: Vector3) (d1: Vector3) (o1: Matrix3x3) (p2: Vector3) (d2: Vector3) (o2: Matrix3x3) =
+        let checkCollisionSATWithCachedAxis
+            (p1: Vector3)
+            (d1: Vector3)
+            (o1: Matrix3x3)
+            (p2: Vector3)
+            (d2: Vector3)
+            (o2: Matrix3x3)
+            (cachedAxisIndex: int) =
+            let inline getAxisByIndex index =
+                match index with
+                | 0 -> o1.R0
+                | 1 -> o1.R1
+                | 2 -> o1.R2
+                | 3 -> o2.R0
+                | 4 -> o2.R1
+                | 5 -> o2.R2
+                | 6 -> Vector3.Cross(o1.R0, o2.R0)
+                | 7 -> Vector3.Cross(o1.R0, o2.R1)
+                | 8 -> Vector3.Cross(o1.R0, o2.R2)
+                | 9 -> Vector3.Cross(o1.R1, o2.R0)
+                | 10 -> Vector3.Cross(o1.R1, o2.R1)
+                | 11 -> Vector3.Cross(o1.R1, o2.R2)
+                | 12 -> Vector3.Cross(o1.R2, o2.R0)
+                | 13 -> Vector3.Cross(o1.R2, o2.R1)
+                | 14 -> Vector3.Cross(o1.R2, o2.R2)
+                | _ -> Vector3.Zero // WTF!?
+            
             let h1 = d1 / 2.0
             let h2 = d2 / 2.0
 
@@ -775,8 +803,9 @@ module Engine =
             let mutable minPenetration = Double.MaxValue
             let mutable mtvAxis = Vector3.Zero
             let mutable colliding = true
+            let mutable winningAxisIndex = -1
 
-            let inline testAxis (axis: Vector3) =
+            let inline testAxis (axis: Vector3) (axisIndex: int) =
                 if axis.MagnitudeSq() > EPSILON then
                     let radius1 =
                         abs (Vector3.Dot(o1.R0 * h1.X, axis))
@@ -788,10 +817,10 @@ module Engine =
                         + abs (Vector3.Dot(o2.R1 * h2.Y, axis))
                         + abs (Vector3.Dot(o2.R2 * h2.Z, axis))
 
-                    let p1_center_proj = Vector3.Dot(delta, axis)
+                    let p1CenterProj = Vector3.Dot(delta, axis)
 
-                    let p1Min = p1_center_proj - radius1
-                    let p1Max = p1_center_proj + radius1
+                    let p1Min = p1CenterProj - radius1
+                    let p1Max = p1CenterProj + radius1
                     let p2Min = -radius2
                     let p2Max = radius2
 
@@ -799,48 +828,58 @@ module Engine =
 
                     if overlap < 0.0 then
                         colliding <- false
+                        winningAxisIndex <- axisIndex 
                     else
                         if overlap < minPenetration then
                             minPenetration <- overlap
                             mtvAxis <- axis
+                            winningAxisIndex <- axisIndex
 
-            testAxis o1.R0
-            
-            if colliding then testAxis o1.R1
-            if colliding then testAxis o1.R2
-            if colliding then testAxis o2.R0
-            if colliding then testAxis o2.R1
-            if colliding then testAxis o2.R2
+            if cachedAxisIndex <> -1 then
+                let cachedAxis = getAxisByIndex cachedAxisIndex
+                testAxis cachedAxis cachedAxisIndex
 
-            let inline testCrossProduct(axisA: Vector3) (axisB: Vector3) =
-                if colliding && abs(Vector3.Dot(axisA, axisB)) < 1.0 - EPSILON then
-                    let crossAxis = Vector3.Cross(axisA, axisB)
-                    // Normalization is not strictly required here for the separation test,
-                    // but is needed for the correct calculation of minPenetration.
-                    // For performance, we could remove it, but to preserve the behavior, we will leave it
-                    testAxis(crossAxis.Normalize())
-                    
-            if colliding then
-                testCrossProduct o1.R0 o2.R0
-                testCrossProduct o1.R0 o2.R1
-                testCrossProduct o1.R0 o2.R2
-                testCrossProduct o1.R1 o2.R0
-                testCrossProduct o1.R1 o2.R1
-                testCrossProduct o1.R1 o2.R2
-                testCrossProduct o1.R2 o2.R0
-                testCrossProduct o1.R2 o2.R1
-                testCrossProduct o1.R2 o2.R2
-
-            if colliding then
-                let mutable normal = mtvAxis.Normalize()
-
-                if Vector3.Dot(normal, delta) < 0.0 then
-                    normal <- -normal
-                    
-                let penetrationVector = normal * minPenetration
-                CollisionResult(penetrationVector)
+            if not colliding then
+                struct(CollisionResult(Vector3.Zero), cachedAxisIndex)
             else
-                CollisionResult(Vector3.Zero)
+                testAxis o1.R0 0
+                
+                if colliding then testAxis o1.R1 1
+                if colliding then testAxis o1.R2 2
+                if colliding then testAxis o2.R0 3
+                if colliding then testAxis o2.R1 4
+                if colliding then testAxis o2.R2 5
+
+                let inline testCrossProduct(axisA: Vector3) (axisB: Vector3) (axisIndex: int) =
+                    if colliding && abs(Vector3.Dot(axisA, axisB)) < 1.0 - EPSILON then
+                        let crossAxis = Vector3.Cross(axisA, axisB)
+                        testAxis (crossAxis.Normalize()) axisIndex
+                
+                if colliding then
+                    testCrossProduct o1.R0 o2.R0 6
+                    testCrossProduct o1.R0 o2.R1 7
+                    testCrossProduct o1.R0 o2.R2 8
+                    testCrossProduct o1.R1 o2.R0 9
+                    testCrossProduct o1.R1 o2.R1 10
+                    testCrossProduct o1.R1 o2.R2 11
+                    testCrossProduct o1.R2 o2.R0 12
+                    testCrossProduct o1.R2 o2.R1 13
+                    testCrossProduct o1.R2 o2.R2 14
+
+                if colliding then
+                    let mutable normal = mtvAxis.Normalize()
+
+                    if Vector3.Dot(normal, delta) < 0.0 then
+                        normal <- -normal
+                        
+                    let penetrationVector = normal * minPenetration
+                    struct(CollisionResult(penetrationVector), winningAxisIndex)
+                else
+                    struct(CollisionResult(Vector3.Zero), winningAxisIndex)
+                    
+        let inline checkCollisionSAT (p1: Vector3) (d1: Vector3) (o1: Matrix3x3) (p2: Vector3) (d2: Vector3) (o2: Matrix3x3) =
+            let struct(result, _) = checkCollisionSATWithCachedAxis p1 d1 o1 p2 d2 o2 -1
+            result
     
     [<RequireQualifiedAccess>]
     module Flora =
@@ -1019,7 +1058,6 @@ module Engine =
                 let newHeight = newDimensions.Z
 
                 r |> fillPrismCoords({ floraDataRef with Dimensions = oldDimensions })
-
                 use oldOccupiedCells = new PooledList<uint64>()
                 oldOccupiedCells.AddRange r._buffer
 
@@ -1039,8 +1077,12 @@ module Engine =
                     else
                         r._bushHash
 
+                use newCellsSet = new PooledSet<uint64>(newOccupiedCells.Span)
+
                 for oldCell in oldOccupiedCells.Span do
-                    if not <| newOccupiedCells.Contains oldCell then
+
+                    if not <| newCellsSet.Remove oldCell then
+
                         match hash.TryGetValue oldCell with
                         | true, idList ->
                             idList |> Utils.removeBySwapBack floraId |> ignore
@@ -1050,16 +1092,15 @@ module Engine =
                                 idList |> Dispose.action
                         | false, _ -> ()
 
-                for newCell in newOccupiedCells.Span do
-                    if not <| oldOccupiedCells.Contains newCell then
-                        match hash.TryGetValue newCell with
-                        | true, idList ->
-                            if not <| idList.Contains floraId then
-                                idList.Add floraId
-                        | false, _ ->
-                            let newList = new PooledList<int>()
-                            newList.Add floraId
-                            hash.Add(newCell, newList)
+                for newCell in newCellsSet do
+                    match hash.TryGetValue newCell with
+                    | true, idList ->
+                        if not <| idList.Contains floraId then
+                            idList.Add floraId
+                    | false, _ ->
+                        let newList = new PooledList<int>()
+                        newList.Add floraId
+                        hash.Add(newCell, newList)
 
         let tryGetTreesInCell coords r = r._treeHash.TryGetValue coords
 
@@ -1129,9 +1170,7 @@ module Engine =
             CollisionProcessedStatic: HashSet<uint64>
             CollisionProcessedFlora: HashSet<int>
             CollisionAABBCache: Dictionary<int, struct(Vector3 * Vector3)>
-    
-            StaticSupportCache: Dictionary<int, bool>
-            
+
             BodiesToAdd: PooledList<Body.T>
             BodiesToRemoveIds: PooledList<int>
             FloraToRemoveIds: PooledList<int>
@@ -1163,9 +1202,7 @@ module Engine =
             this.CollisionProcessedStatic.Clear()
             this.CollisionProcessedFlora.Clear()
             this.CollisionAABBCache.Clear()
-                
-            this.StaticSupportCache.Clear()
-            
+
             this.BodiesToAdd.Clear()
             this.BodiesToRemoveIds.Clear()
             this.FloraToRemoveIds.Clear()
@@ -1185,9 +1222,7 @@ module Engine =
                 CollisionProcessedStatic = HashSet()
                 CollisionProcessedFlora = HashSet()
                 CollisionAABBCache = Dictionary<_, _>()
-    
-                StaticSupportCache = Dictionary<_, _>()
-                
+
                 BodiesToAdd = new PooledList<_>()
                 BodiesToRemoveIds = new PooledList<_>()
                 FloraToRemoveIds = new PooledList<_>()
@@ -1418,6 +1453,14 @@ module Engine =
                                 
                 isFree
 
+        [<Struct>]
+        type private DistanceComparer =
+            interface IComparer<struct(Vector3 * double)> with
+                member _.Compare(x, y) =
+                    let struct(_, distanceX) = x
+                    let struct(_, distanceY) = y
+                    distanceX.CompareTo distanceY
+            
         let trySnapToGridCollisionAware
             (body: byref<Body.T>)
             bodyRepo
@@ -1454,7 +1497,7 @@ module Engine =
                     
                     allCandidatePoints.Add(struct(wrappedPoint, distSq))
 
-            allCandidatePoints.Sort(fun (struct(_, distA)) (struct(_, distB)) -> distA.CompareTo(distB))
+            allCandidatePoints.Sort(DistanceComparer())
             
             let mutable isFoundSnapPoint = false
             let mutable i = 0
@@ -1489,6 +1532,19 @@ module Engine =
     [<RequireQualifiedAccess>]
     module Island =
         
+        [<Struct; IsReadOnly; StructLayout(LayoutKind.Sequential, Pack = 1)>]
+        type ContactData =
+            new(slotIndex, itemIndex, cachedSeparatingAxis) =
+                {
+                    SlotIndex = slotIndex
+                    ItemIndexInList = itemIndex
+                    CachedSeparatingAxis = cachedSeparatingAxis
+                }
+                
+            val SlotIndex: int
+            val ItemIndexInList: int
+            val CachedSeparatingAxis: int
+            
         [<Struct; IsReadOnly>]
         type ExpiringContacts =
             private new (slots, lookup, currentSlot) =
@@ -1499,7 +1555,7 @@ module Engine =
                 }
             
             val private _slots: PooledList<int64>[]
-            val private _lookup: PooledDictionary<int64, struct(int * int)>
+            val private _lookup: PooledDictionary<int64, ContactData>
             val private _currentSlot: int
 
             static member Create() =
@@ -1514,33 +1570,56 @@ module Engine =
 
             member this.TransferTo(target: byref<ExpiringContacts>) =
                 for slotIndex = 0 to this._slots.Length - 1 do
-                    let sourceSlot = this._slots[slotIndex]
-                    if sourceSlot.Count > 0 then
-                        let ttl = (slotIndex - this._currentSlot + this._slots.Length) % this._slots.Length
-                        if ttl > 0 then
-                            for key in sourceSlot.Span do
-                                target.AddOrUpdate(key, ttl)
+                let sourceSlot = this._slots[slotIndex]
+                if sourceSlot.Count > 0 then
+                    let ttl = (slotIndex - this._currentSlot + this._slots.Length) % this._slots.Length
+                    if ttl > 0 then
+                        for key in sourceSlot.Span do
+                            let axis = this._lookup[key].CachedSeparatingAxis
+                            target.AddOrUpdate(key, ttl, axis)
                 this.Clear()
                 
-            member this.AddOrUpdate(key, ttl) =
+            member this.AddOrUpdate(key, ttl, newCachedAxis) =
                 let newTtl = min CONTACT_TTL (max 1 ttl)
                 let newSlotIndex = (this._currentSlot + newTtl) % this._slots.Length
 
                 match this._lookup.TryGetValue key with
-                | true, struct(oldSlotIndex, _) ->
-                    if oldSlotIndex <> newSlotIndex then
+                | true, oldData ->
+                    if oldData.SlotIndex <> newSlotIndex then
                         this.Remove key |> ignore
                         let targetSlotList = this._slots[newSlotIndex]
                         targetSlotList.Add key
-                        this._lookup.Add(key, struct(newSlotIndex, targetSlotList.Count - 1))
+                        this._lookup.Add(key, ContactData(newSlotIndex, targetSlotList.Count - 1, newCachedAxis ))
+                    else
+                        this._lookup[key] <- ContactData(oldData.SlotIndex, oldData.ItemIndexInList, newCachedAxis)
                 | false, _ ->
                     let targetSlotList = this._slots[newSlotIndex]
                     targetSlotList.Add key
-                    this._lookup.Add(key, struct(newSlotIndex, targetSlotList.Count - 1))
-
+                    let newData = ContactData(newSlotIndex, targetSlotList.Count - 1, newCachedAxis)
+                    this._lookup.Add(key, newData)
+            
+            member this.AddOrUpdate(key, ttl) =
+                let currentAxis = 
+                    match this._lookup.TryGetValue key with
+                    | true, data -> data.CachedSeparatingAxis
+                    | false, _ -> -1
+                this.AddOrUpdate(key, ttl, currentAxis)
+            
+            member this.TryGetCachedAxis(key, axis: byref<int>) =
+                match this._lookup.TryGetValue key with
+                | true, data ->
+                    axis <- data.CachedSeparatingAxis
+                    true
+                | false, _ ->
+                    axis <- -1
+                    false
+                
             member this.Remove key =
                 match this._lookup.TryGetValue key with
-                | true, struct(slotIndex, itemIndexInList) ->
+                | true, data ->
+                    let slotIndex = data.SlotIndex
+                    let itemIndexInList = data.ItemIndexInList
+
                     this._lookup.Remove key |> ignore
 
                     let list = this._slots[slotIndex]
@@ -1549,7 +1628,8 @@ module Engine =
                     if itemIndexInList < lastIndex then
                         let lastItemKey = list[lastIndex]
                         list[itemIndexInList] <- lastItemKey
-                        this._lookup[lastItemKey] <- struct(slotIndex, itemIndexInList)
+                        let item = this._lookup[lastItemKey]
+                        this._lookup[lastItemKey] <- ContactData(item.SlotIndex, itemIndexInList, item.CachedSeparatingAxis)
 
                     list.RemoveAt lastIndex
                     true
@@ -1573,34 +1653,77 @@ module Engine =
 
             interface IDisposable with
                 member this.Dispose() = this.Dispose()
-                
+
+        type ContactsHolder =
+            {
+                mutable Contacts: ExpiringContacts
+            }
+            
         [<Struct>]
         type T =
             new(id) =
                 {
                     Id = id
                     Bodies = new PooledSet<_>()
-                    ContactTTL = ExpiringContacts.Create()
+                    _contactsHolder = null
                     IsAwake = true
                     FramesResting = 0
                     CantSleepFrames = 2
                     IsSlow = false
+                    IsGrounded = false
                 }
             val Id: int
             val Bodies: PooledSet<int>
-            val mutable ContactTTL : ExpiringContacts
+            val mutable _contactsHolder : ContactsHolder | null
             val mutable IsAwake : bool
             val mutable FramesResting : int
             val mutable CantSleepFrames : int
             val mutable IsSlow : bool
+            val mutable IsGrounded : bool
+            
+            member inline this.EnsureContactsExist() =
+                if isNull this._contactsHolder then
+                    this._contactsHolder <- { Contacts = ExpiringContacts.Create() }
+                    
+            member inline this.AddOrUpdateContact(key, ttl, newCachedAxis) =
+                this.EnsureContactsExist()
+                this._contactsHolder.Contacts.AddOrUpdate(key, ttl, newCachedAxis)
 
+            member inline this.TryGetCachedAxis(key, axis: byref<int>) =
+                if isNull this._contactsHolder then
+                    axis <- -1
+                    false
+                else
+                    this._contactsHolder.Contacts.TryGetCachedAxis(key, &axis)
+
+            member inline this.RemoveContact(key) =
+                if isNull this._contactsHolder then
+                    false
+                else
+                    this._contactsHolder.Contacts.Remove(key)
+
+            member this.GetContactKeys() : ICollection<int64> =
+                if isNull this._contactsHolder then
+                    Array.Empty() :> ICollection<int64>
+                else
+                    this._contactsHolder.Contacts.GetKeys()
+                    
+            member this.ContactCount =
+                if isNull this._contactsHolder then 0 else this._contactsHolder.Contacts.Count
+
+            member inline this.MergeContactsFrom(sourceIsland: byref<T>) =
+                if not <| isNull sourceIsland._contactsHolder then
+                    this.EnsureContactsExist()
+                    sourceIsland._contactsHolder.Contacts.TransferTo &this._contactsHolder.Contacts
+                    
             member this.NextStep() =
-                if this.IsSlow then
-                    this.ContactTTL <- this.ContactTTL.NextStep()
+                if not <| isNull this._contactsHolder && this.IsSlow then
+                    this._contactsHolder.Contacts <-this._contactsHolder.Contacts.NextStep()
                     
             member this.Dispose() =
                 this.Bodies |> Dispose.action
-                this.ContactTTL |> Dispose.action
+                if not <| isNull this._contactsHolder then
+                    this._contactsHolder.Contacts |> Dispose.action
                 
             interface IDisposable with
                 member this.Dispose() = this.Dispose()
@@ -1623,6 +1746,7 @@ module Engine =
                     _islandsToSleep : HashSet<int64>
                     _islandsMarkedForSplit : HashSet<int64>
                     _islandsInvolvedInMerge: HashSet<int64>
+                    _staticSupportCache: Dictionary<int, bool>
                     _freeIds : List<int>
                     _logger : ILogger
                     mutable _currentId: int
@@ -1655,6 +1779,7 @@ module Engine =
                     _islandsToSleep = HashSet()
                     _islandsMarkedForSplit = HashSet()
                     _islandsInvolvedInMerge = HashSet()
+                    _staticSupportCache = Dictionary()
                     _freeIds = List()
                     _logger = Log.ForContext<Repo>()
                     _currentId = -1
@@ -1726,9 +1851,8 @@ module Engine =
             
         let private findConnectedComponents
             (bodiesToAnalyze: ICollection<int>)
-            (contacts: ExpiringContacts) =
-                
-            use adjacencyMap = buildAdjacencyMap bodiesToAnalyze (contacts.GetKeys())
+            (island: inref<T>) =
+            use adjacencyMap = buildAdjacencyMap bodiesToAnalyze (island.GetContactKeys())
             let result = new PooledList<PooledList<int>>()
             use visited = new PooledSet<int>()
 
@@ -1746,8 +1870,9 @@ module Engine =
             (body: inref<Body.T>)
             (occupiedCells: ReadOnlySpan<uint64>)
             geometryRepo
-            (cache: Dictionary<_, _>) =
+            r =
             
+            let cache = r._staticSupportCache
             match cache.TryGetValue body.Id with
             | true, result -> result
             | false, _ ->
@@ -1794,8 +1919,8 @@ module Engine =
             bodyRepo
             activeHash
             geometryRepo
-            cache
-            (island: inref<T>)=
+            (island: inref<T>)
+            r =
             
             if island.Bodies.Count = 0 then
                 true
@@ -1805,7 +1930,7 @@ module Engine =
                     let body = &Body.getRef bodyId bodyRepo
                     if not <| Unsafe.IsNullRef &body then
                         let occupiedCells = SpatialHash.getOccupiedCells bodyId activeHash
-                        if hasStaticSupport &body occupiedCells geometryRepo cache then
+                        if hasStaticSupport &body occupiedCells geometryRepo r then
                             anchors.Add bodyId
 
                 if anchors.Count = 0 then
@@ -1813,7 +1938,7 @@ module Engine =
                 elif anchors.Count = island.Bodies.Count then
                     true
                 else
-                    use adjacencyMap = buildAdjacencyMap island.Bodies (island.ContactTTL.GetKeys())
+                    use adjacencyMap = buildAdjacencyMap island.Bodies (island.GetContactKeys())
                     use visited = new PooledSet<int>()
                     use queue = new PooledQueue<int>()
                     
@@ -1860,7 +1985,9 @@ module Engine =
                 if island.Bodies.Count = 0 then
                     if not <| r._removeIslandsBuffer.Contains islandId then
                        r._removeIslandsBuffer.Add islandId
-        
+                       
+            r._staticSupportCache.Remove bodyId |> ignore
+            
         let requestWakeIsland (island: byref<T>) r =
             island.FramesResting <- 0
             if not island.IsAwake && r._islandsToWake.Add island.Id then
@@ -1873,14 +2000,15 @@ module Engine =
                 if not <| Unsafe.IsNullRef &sourceIsland && not <| Unsafe.IsNullRef &targetIsland then
                     targetIsland.CantSleepFrames <- max sourceIsland.CantSleepFrames targetIsland.CantSleepFrames
                     targetIsland.FramesResting <- 0
- 
+                    targetIsland.IsGrounded <- sourceIsland.IsGrounded || targetIsland.IsGrounded
+                    
                     use bodiesToMove = new PooledList<int>(sourceIsland.Bodies)
                     for bodyId in bodiesToMove.Span do
                         targetIsland.Bodies.Add bodyId |> ignore
                         r._bodyToIslandMap[bodyId] <- targetId
-
-                    sourceIsland.ContactTTL.TransferTo &targetIsland.ContactTTL
-
+                    
+                    targetIsland.MergeContactsFrom &sourceIsland
+   
                     r._freeIds.Add sourceIsland.Id
                     
                     sourceIsland |> Dispose.action
@@ -1895,10 +2023,17 @@ module Engine =
             if id1 <> id2 then
                 let inline findRoot (islandId: int64) =
                     let mutable currentId = islandId
-                    use visited = new PooledSet<int64>() 
-                    while r._mergeRedirects.ContainsKey currentId && visited.Add currentId do
+                    use path = new PooledList<int64>()
+
+                    while r._mergeRedirects.ContainsKey currentId do
+                        path.Add currentId
                         currentId <- r._mergeRedirects[currentId]
-                    currentId
+                    
+                    let rootId = currentId
+                    for nodeOnPath in path.Span do
+                        r._mergeRedirects[nodeOnPath] <- rootId
+
+                    rootId
 
                 let root1 = findRoot id1
                 let root2 = findRoot id2
@@ -1943,7 +2078,7 @@ module Engine =
             elif r._islandsMarkedForSplit.Add islandId then
                 r._logger.Information("Request split island: {IslandId}", islandId)
         
-        let processIslandChanges buffers r =
+        let processIslandChanges geometryRepo buffers r =
             r._mergeRedirects.Clear()
             r._islandsInvolvedInMerge.Clear()
             
@@ -1968,7 +2103,8 @@ module Engine =
                         let body = &Body.getRef bodyId r._bodyRepo
                         if not <| Unsafe.IsNullRef &body then
                             SpatialHash.add &body buffers r._activeHash
-                            
+                        r._staticSupportCache.Remove bodyId |> ignore
+                        
                     r._sleepingIslandIds.Remove island.Id |> ignore
                     r._activeIslandIds.Add island.Id |> ignore
             r._islandsToWake.Clear()
@@ -1981,7 +2117,7 @@ module Engine =
             for islandIdToSplit in r._islandsMarkedForSplit do
                 let mutable originalIsland = &getIslandRef islandIdToSplit r
                 if not <| Unsafe.IsNullRef &originalIsland then
-                    use components = findConnectedComponents originalIsland.Bodies originalIsland.ContactTTL
+                    use components = findConnectedComponents originalIsland.Bodies &originalIsland
 
                     if components.Count <= 1 then
                         components |> Seq.iter Dispose.action
@@ -1996,10 +2132,11 @@ module Engine =
                                 maxBodyCount <- components[i].Count
                                 largestComponentIndex <- i
 
+                        let originalContactKeys = originalIsland.GetContactKeys()
                         for i = 0 to components.Count - 1 do
                             if i <> largestComponentIndex then
                                 let fragmentComponent = components[i]
-                                let newFragmentIsland = r |> newIsland
+                                let mutable newFragmentIsland = r |> newIsland
                                 r._allIslands.Add(newFragmentIsland.Id, newFragmentIsland)
                                 r._activeIslandIds.Add newFragmentIsland.Id |> ignore
                                 
@@ -2010,19 +2147,37 @@ module Engine =
                                     originalIsland.Bodies.Remove bodyId |> ignore
                                     r._bodyToIslandMap[bodyId] <- newFragmentIsland.Id
 
-                                for contactKey in originalIsland.ContactTTL.GetKeys() do
+                                for contactKey in originalContactKeys do
                                     let struct(id1, id2) = ContactKey.unpack contactKey
                                     if newFragmentIsland.Bodies.Contains id1 && newFragmentIsland.Bodies.Contains id2 then
-                                       newFragmentIsland.ContactTTL.AddOrUpdate(contactKey, CONTACT_TTL)
-                                       
+                                       let mutable cachedAxis = -1
+                                       originalIsland.TryGetCachedAxis(contactKey, &cachedAxis) |> ignore
+                                       newFragmentIsland.AddOrUpdateContact(contactKey, CONTACT_TTL, cachedAxis)
+                                
+                                newFragmentIsland.IsGrounded <-
+                                    isGrounded
+                                        r._bodyRepo
+                                        r._activeHash
+                                        geometryRepo
+                                        &newFragmentIsland
+                                        r
+                                        
+                        originalIsland.IsGrounded <-
+                            isGrounded
+                                r._bodyRepo
+                                r._activeHash
+                                geometryRepo
+                                &originalIsland
+                                r
+                                
                         use contactsToRemove = new PooledList<int64>()
-                        for contactKey in originalIsland.ContactTTL.GetKeys() do
+                        for contactKey in originalContactKeys do
                             let struct(id1, id2) = ContactKey.unpack contactKey
                             if not <| originalIsland.Bodies.Contains id1 || not <| originalIsland.Bodies.Contains id2 then
                                 contactsToRemove.Add contactKey
                         
                         for key in contactsToRemove.Span do
-                            originalIsland.ContactTTL.Remove key |> ignore
+                            originalIsland.RemoveContact key |> ignore
 
                         components |> Seq.iter Dispose.action
                 
@@ -2793,7 +2948,7 @@ module Engine =
                 else
                     axisProximity minA.Y maxA.Y minB.Y maxB.Y WorldLimits.Y
                         
-        let private resolveFloorAndCeilingCollisions (b1: byref<Body.T>) invMass1 dt =
+        let private resolveFloorAndCeilingCollisions (b1: byref<Body.T>) invMass1 islandRepo dt =
             if invMass1 > EPSILON then
                 let h = b1.Dimensions / 2.0
                 
@@ -2826,7 +2981,11 @@ module Engine =
                             
                     let struct(finalNormal, _) = floorCollisionResult.Normalize() 
                     resolveStaticFriction &b1 finalNormal totalImpulseScalar invMass1 dt
-
+                    
+                    let island = &Island.getIslandRefForBody b1.Id islandRepo
+                    if not <| Unsafe.IsNullRef &island then
+                        island.IsGrounded <- true
+                        
                 // Проверка столкновения с потолком
                 let mutable highestPointZ = Double.MinValue
                 let worldAABB_maxZ = b1.Position.Z + b1.Dimensions.Z * 0.5
@@ -2858,14 +3017,20 @@ module Engine =
             dt =
                 
             if Collision.checkCollisionAABB minA maxA minB maxB then
-                let result =
-                    Collision.checkCollisionSAT
+                let island1 = &Island.getIslandRefForBody b1.Id islandRepo
+                let contactKey = ContactKey.key b1.Id b2.Id
+                let mutable cachedAxis = -1
+                island1.TryGetCachedAxis(contactKey, &cachedAxis) |> ignore
+
+                let struct(result, newCachedAxis) =
+                    Collision.checkCollisionSATWithCachedAxis
                         b1.Position
                         b1.Dimensions
                         b1.Orientation
                         b2.Position
                         b2.Dimensions
                         b2.Orientation
+                        cachedAxis
                     
                 if result.AreColliding then
                     let struct(finalNormal, penetrationDepth) = result.Normalize()
@@ -2887,15 +3052,14 @@ module Engine =
                         b2.InvMass
                         dt
 
-                    let island1 = &Island.getIslandRefForBody b1.Id islandRepo
                     let island2 = &Island.getIslandRefForBody b2.Id islandRepo
                     
                     let contactKey = ContactKey.key b1.Id b2.Id
-                    island1.ContactTTL.AddOrUpdate(contactKey, CONTACT_TTL)
+                    island1.AddOrUpdateContact(contactKey, CONTACT_TTL, newCachedAxis)
                     
                     if island1.Id <> island2.Id then
                         islandRepo |> Island.requestMerge island1.Id island2.Id
-                        island2.ContactTTL.AddOrUpdate(contactKey, CONTACT_TTL)                                
+                        island2.AddOrUpdateContact(contactKey, CONTACT_TTL, newCachedAxis)                              
 
                     b1.IsSnappedToGrid <- false
                     b2.IsSnappedToGrid <- false
@@ -2905,7 +3069,7 @@ module Engine =
 
                     if island1.Id = island2.Id then
                         let contactKey = ContactKey.key b1.Id b2.Id
-                        island1.ContactTTL.AddOrUpdate(contactKey, CONTACT_TTL)
+                        island1.AddOrUpdateContact(contactKey, CONTACT_TTL, newCachedAxis)
         
         let private resolveDynamicSleepingCollision
             (b1: byref<Body.T>)
@@ -2922,15 +3086,21 @@ module Engine =
                     b2.Orientation
             
             if Collision.checkCollisionAABB minA maxA minB maxB then
-                let result =
-                    Collision.checkCollisionSAT
+                let island1 = &Island.getIslandRefForBody b1.Id islandRepo
+                let contactKey = ContactKey.key b1.Id b2.Id
+                let mutable cachedAxis = -1
+                island1.TryGetCachedAxis(contactKey, &cachedAxis) |> ignore
+        
+                let struct(result, newCachedAxis) =
+                    Collision.checkCollisionSATWithCachedAxis
                         b1.Position
                         b1.Dimensions
                         b1.Orientation
                         b2.Position
                         b2.Dimensions
                         b2.Orientation
-                
+                        cachedAxis
+                        
                 if result.AreColliding then
                     let struct(finalNormal, penetrationDepth) = result.Normalize()
                     let stableResult = CollisionResult(finalNormal * penetrationDepth)
@@ -2951,21 +3121,20 @@ module Engine =
                         b1.InvMass
                         b2.InvMass
                         dt
-                                                    
-                    let island1 = &Island.getIslandRefForBody b1.Id islandRepo
+
                     let island2 = &Island.getIslandRefForBody b2.Id islandRepo
                                                     
                     Island.requestWakeIsland &island2 islandRepo
                     islandRepo |> Island.requestMerge island2.Id island1.Id
 
                     let contactKey = ContactKey.key b1.Id b2.Id
-                    island1.ContactTTL.AddOrUpdate(contactKey, CONTACT_TTL)
-                    island2.ContactTTL.AddOrUpdate(contactKey, CONTACT_TTL)
+                    island1.AddOrUpdateContact(contactKey, CONTACT_TTL, newCachedAxis)
+                    island2.AddOrUpdateContact(contactKey, CONTACT_TTL, newCachedAxis)
 
                     b1.IsSnappedToGrid <- false
                     b2.IsSnappedToGrid <- false
         
-        let private resolveStaticGeometryCollision (b1: byref<Body.T>) cellKey dt =
+        let private resolveStaticGeometryCollision (b1: byref<Body.T>) cellKey islandRepo dt =
             let struct (pos, dims, orient) = cellKey |> Geometry.getPrismSpaceByKey 
             let result =
                 Collision.checkCollisionSAT
@@ -2983,13 +3152,15 @@ module Engine =
                 let totalImpulseScalar = resolveStaticCollision &b1 stableResult
                                         
                 resolveStaticFriction &b1 finalNormal totalImpulseScalar b1.InvMass dt
-
+                let island = &Island.getIslandRefForBody b1.Id islandRepo
+                if not <| Unsafe.IsNullRef &island then
+                    island.IsGrounded <- true
+                    
         let private resolveFloraCollision
             (b1: byref<Body.T>)
             treeId
             floraRepo
             buffers
-            (destroyedThisFrame: HashSet<int>)
             (rnd: Random)
             dt =
             let treeData = &Flora.tryGetTreeDataRef treeId floraRepo
@@ -3008,7 +3179,7 @@ module Engine =
                                                     
                     if impact > treeData.BreakThreshold then
                         treeData.IsDestroyed <- true
-                        destroyedThisFrame.Add treeId |> ignore
+                        buffers.CollisionDestroyedFlora.Add treeId |> ignore
                         let mutable newBody = Flora.createBodyFromFlora treeData.Id treeData
                         let hVel = Vector3(b1.Velocity.X, b1.Velocity.Y, 0.0)
                         let fallDirection =
@@ -3076,7 +3247,7 @@ module Engine =
                     let b1 = &Body.getRef id1 bodyRepo
                     let invMass1 = if b1.IsFallingOver then 0.0 else b1.InvMass
 
-                    resolveFloorAndCeilingCollisions &b1 invMass1 sub_dt
+                    resolveFloorAndCeilingCollisions &b1 invMass1 islandRepo sub_dt
 
                     processedSleeping.Clear()
                     processedStatic.Clear()
@@ -3120,14 +3291,24 @@ module Engine =
                         // Dynamic <-> Static Geometry
                         if geometryRepo |> Geometry.isSolid cellKey then
                             if processedStatic.Add cellKey then
-                                resolveStaticGeometryCollision &b1 cellKey sub_dt
+                                resolveStaticGeometryCollision
+                                    &b1
+                                    cellKey
+                                    islandRepo
+                                    sub_dt
 
                         // Dynamic <-> Flora
                         match floraRepo |> Flora.tryGetTreesInCell cellKey with
                         | true, treeIds ->
                             for treeId in treeIds.Span do
                                 if not <| destroyedFlora.Contains treeId && processedFlora.Add treeId then
-                                    resolveFloraCollision &b1 treeId floraRepo buffers destroyedFlora rnd sub_dt
+                                    resolveFloraCollision
+                                        &b1
+                                        treeId
+                                        floraRepo
+                                        buffers
+                                        rnd
+                                        sub_dt
                         | _ -> ()
 
         let private postProcessAndUpdateSleepState engine =
@@ -3143,7 +3324,7 @@ module Engine =
             for islandId in islandRepo |> Island.getActiveIslandIds do
                 let island = &Island.getIslandRef islandId islandRepo
                 if island.IsAwake then
-                    if island.Bodies.Count > 1 && island.ContactTTL.Count < island.Bodies.Count - 1 then
+                    if island.Bodies.Count > 1 && island.ContactCount < island.Bodies.Count - 1 then
                         islandRepo |> Island.requestSplit island.Id
                     let mutable isStillSlow = true
                     let mutable enumerator = island.Bodies.GetEnumerator()
@@ -3169,7 +3350,7 @@ module Engine =
                     island.IsSlow <- isStillSlow
                     
                     if island.IsSlow then
-                        if Island.isGrounded bodyRepo activeHash geometryRepo engine._buffers.StaticSupportCache &island then
+                        if island.IsGrounded then
                             island.FramesResting <- island.FramesResting + 1
                             
                             if island.FramesResting >= FRAMES_TO_SLEEP && island.CantSleepFrames <= 0 then
@@ -3263,7 +3444,7 @@ module Engine =
 
             engine |> applyDeferredChanges
 
-            engine._islandRepo |> Island.processIslandChanges engine._buffers
+            engine._islandRepo |> Island.processIslandChanges engine._geometryRepo engine._buffers
             
             engine._buffers.Clear()
 
