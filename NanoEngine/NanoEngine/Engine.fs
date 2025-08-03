@@ -1122,8 +1122,16 @@ module Engine =
             UnrootedFlora: PooledList<Flora.T>
             FallingPrisms: PooledList<Body.T>
             SnapPointsBuffer: PooledList<Vector3>
-            CheckedBodyPairs : HashSet<int64>
+            CollisionCheckedBodyPairs : HashSet<int64>
   
+            CollisionDestroyedFlora: HashSet<int>
+            CollisionProcessedSleeping: HashSet<int>
+            CollisionProcessedStatic: HashSet<uint64>
+            CollisionProcessedFlora: HashSet<int>
+            CollisionAABBCache: Dictionary<int, struct(Vector3 * Vector3)>
+    
+            StaticSupportCache: Dictionary<int, bool>
+            
             BodiesToAdd: PooledList<Body.T>
             BodiesToRemoveIds: PooledList<int>
             FloraToRemoveIds: PooledList<int>
@@ -1134,6 +1142,7 @@ module Engine =
             this.UnrootedFlora |> Dispose.action
             this.FallingPrisms |> Dispose.action
             this.SnapPointsBuffer |> Dispose.action
+
             this.BodiesToAdd |> Dispose.action
             this.BodiesToRemoveIds |> Dispose.action
             this.FloraToRemoveIds |> Dispose.action
@@ -1147,12 +1156,20 @@ module Engine =
             this.UnrootedFlora.Clear()
             this.FallingPrisms.Clear()
             this.SnapPointsBuffer.Clear()
+            
+            this.CollisionCheckedBodyPairs.Clear()
+            this.CollisionDestroyedFlora.Clear()
+            this.CollisionProcessedSleeping.Clear()
+            this.CollisionProcessedStatic.Clear()
+            this.CollisionProcessedFlora.Clear()
+            this.CollisionAABBCache.Clear()
+                
+            this.StaticSupportCache.Clear()
+            
             this.BodiesToAdd.Clear()
             this.BodiesToRemoveIds.Clear()
             this.FloraToRemoveIds.Clear()
             this.PrismsToRemoveCoords.Clear()
-
-            this.CheckedBodyPairs.Clear()
 
         static member Create() =
             {
@@ -1162,11 +1179,19 @@ module Engine =
                 FallingPrisms = new PooledList<_>()
                 SnapPointsBuffer = new PooledList<_>()
 
+                CollisionCheckedBodyPairs = HashSet()
+                CollisionDestroyedFlora = HashSet()
+                CollisionProcessedSleeping = HashSet()
+                CollisionProcessedStatic = HashSet()
+                CollisionProcessedFlora = HashSet()
+                CollisionAABBCache = Dictionary<_, _>()
+    
+                StaticSupportCache = Dictionary<_, _>()
+                
                 BodiesToAdd = new PooledList<_>()
                 BodiesToRemoveIds = new PooledList<_>()
                 FloraToRemoveIds = new PooledList<_>()
                 PrismsToRemoveCoords = new PooledList<_>()
-                CheckedBodyPairs = HashSet()
             }
 
     [<RequireQualifiedAccess>]
@@ -1720,48 +1745,56 @@ module Engine =
         let private hasStaticSupport
             (body: inref<Body.T>)
             (occupiedCells: ReadOnlySpan<uint64>)
-            geometryRepo=
-                    
-            let mutable hasFoundSupport = false
-
-            let h = body.Dimensions / 2.0
-            let mutable lowestPointZ = Double.MaxValue
-            for i = 0 to 7 do
-                let signX = if (i &&& 1) = 0 then -1.0 else 1.0
-                let signY = if (i &&& 2) = 0 then -1.0 else 1.0
-                let signZ = if (i &&& 4) = 0 then -1.0 else 1.0
-                let localCorner = Vector3(h.X * signX, h.Y * signY, h.Z * signZ)
-                let worldCorner = body.Position + body.Orientation * localCorner
-                lowestPointZ <- min lowestPointZ worldCorner.Z
+            geometryRepo
+            (cache: Dictionary<_, _>) =
             
-            if lowestPointZ < PENETRATION_SLOP then
-                hasFoundSupport <- true
-  
-            if not hasFoundSupport then
-                let mutable i = 0
-                while not hasFoundSupport && i < occupiedCells.Length do
-                    let cellKey = &occupiedCells[i]
-                    if geometryRepo |> Geometry.isSolid cellKey then
-                        let struct (staticPos, staticDims, staticOrient) = cellKey |> Geometry.getPrismSpaceByKey
-                        let result =
-                            Collision.checkCollisionSAT
-                                body.Position
-                                body.Dimensions
-                                body.Orientation
-                                staticPos
-                                staticDims
-                                staticOrient
-                                
-                        if result.AreColliding then
-                            hasFoundSupport <- true
-                    i <- i + 1
-                    
-            hasFoundSupport
+            match cache.TryGetValue body.Id with
+            | true, result -> result
+            | false, _ ->
+                
+                let mutable hasFoundSupport = false
+
+                let h = body.Dimensions / 2.0
+                let mutable lowestPointZ = Double.MaxValue
+                for i = 0 to 7 do
+                    let signX = if (i &&& 1) = 0 then -1.0 else 1.0
+                    let signY = if (i &&& 2) = 0 then -1.0 else 1.0
+                    let signZ = if (i &&& 4) = 0 then -1.0 else 1.0
+                    let localCorner = Vector3(h.X * signX, h.Y * signY, h.Z * signZ)
+                    let worldCorner = body.Position + body.Orientation * localCorner
+                    lowestPointZ <- min lowestPointZ worldCorner.Z
+                
+                if lowestPointZ < PENETRATION_SLOP then
+                    hasFoundSupport <- true
+      
+                if not hasFoundSupport then
+                    let mutable i = 0
+                    while not hasFoundSupport && i < occupiedCells.Length do
+                        let cellKey = &occupiedCells[i]
+                        if geometryRepo |> Geometry.isSolid cellKey then
+                            let struct (staticPos, staticDims, staticOrient) = cellKey |> Geometry.getPrismSpaceByKey
+                            let result =
+                                Collision.checkCollisionSAT
+                                    body.Position
+                                    body.Dimensions
+                                    body.Orientation
+                                    staticPos
+                                    staticDims
+                                    staticOrient
+                                    
+                            if result.AreColliding then
+                                hasFoundSupport <- true
+                        i <- i + 1
+                
+                cache.Add(body.Id, hasFoundSupport)
+                
+                hasFoundSupport
         
         let isGrounded
             bodyRepo
             activeHash
             geometryRepo
+            cache
             (island: inref<T>)=
             
             if island.Bodies.Count = 0 then
@@ -1772,7 +1805,7 @@ module Engine =
                     let body = &Body.getRef bodyId bodyRepo
                     if not <| Unsafe.IsNullRef &body then
                         let occupiedCells = SpatialHash.getOccupiedCells bodyId activeHash
-                        if hasStaticSupport &body occupiedCells geometryRepo then
+                        if hasStaticSupport &body occupiedCells geometryRepo cache then
                             anchors.Add bodyId
 
                 if anchors.Count = 0 then
@@ -2956,7 +2989,7 @@ module Engine =
             treeId
             floraRepo
             buffers
-            (destroyedThisFrame: PooledSet<int>)
+            (destroyedThisFrame: HashSet<int>)
             (rnd: Random)
             dt =
             let treeData = &Flora.tryGetTreeDataRef treeId floraRepo
@@ -3016,14 +3049,19 @@ module Engine =
             let floraRepo = engine._floraRepo
             let rnd = engine._random
             
-            let checkedBodyPairs = buffers.CheckedBodyPairs
-            checkedBodyPairs.Clear()
+            let checkedBodyPairs = buffers.CollisionCheckedBodyPairs
+            let destroyedFlora = buffers.CollisionDestroyedFlora
+            let processedSleeping = buffers.CollisionProcessedSleeping
+            let processedStatic = buffers.CollisionProcessedStatic
+            let processedFlora = buffers.CollisionProcessedFlora
+            let aabbCache = buffers.CollisionAABBCache
             
-            use destroyedThisFrame = new PooledSet<int>()
-            use processedSleepingPartners = new PooledSet<int>()
-            use processedStaticPrisms = new PooledSet<uint64>()
-            use processedFloraPartners = new PooledSet<int>()
-            use aabbCache = new PooledDictionary<int, struct(Vector3 * Vector3)>()
+            checkedBodyPairs.Clear()
+            destroyedFlora.Clear()
+            processedSleeping.Clear()
+            processedStatic.Clear()
+            processedFlora.Clear()
+            aabbCache.Clear()
             
             for islandId in islandRepo |> Island.getActiveIslandIds do
                 let island = &Island.getIslandRef islandId islandRepo
@@ -3040,9 +3078,9 @@ module Engine =
 
                     resolveFloorAndCeilingCollisions &b1 invMass1 sub_dt
 
-                    processedSleepingPartners.Clear()
-                    processedStaticPrisms.Clear()
-                    processedFloraPartners.Clear()
+                    processedSleeping.Clear()
+                    processedStatic.Clear()
+                    processedFlora.Clear()
 
                     let struct(minA, maxA) = aabbCache[id1]
                     
@@ -3069,7 +3107,7 @@ module Engine =
 
                         // Dynamic <-> Sleeping
                         for sleepingId in SpatialHash.query cellKey sleepingHash do
-                            if processedSleepingPartners.Add sleepingId then
+                            if processedSleeping.Add sleepingId then
                                 let b2 = &Body.getRef sleepingId bodyRepo
                                 resolveDynamicSleepingCollision
                                     &b1
@@ -3081,15 +3119,15 @@ module Engine =
 
                         // Dynamic <-> Static Geometry
                         if geometryRepo |> Geometry.isSolid cellKey then
-                            if processedStaticPrisms.Add cellKey then
+                            if processedStatic.Add cellKey then
                                 resolveStaticGeometryCollision &b1 cellKey sub_dt
 
                         // Dynamic <-> Flora
                         match floraRepo |> Flora.tryGetTreesInCell cellKey with
                         | true, treeIds ->
                             for treeId in treeIds.Span do
-                                if not <| destroyedThisFrame.Contains treeId && processedFloraPartners.Add treeId then
-                                    resolveFloraCollision &b1 treeId floraRepo buffers destroyedThisFrame rnd sub_dt
+                                if not <| destroyedFlora.Contains treeId && processedFlora.Add treeId then
+                                    resolveFloraCollision &b1 treeId floraRepo buffers destroyedFlora rnd sub_dt
                         | _ -> ()
 
         let private postProcessAndUpdateSleepState engine =
@@ -3131,7 +3169,7 @@ module Engine =
                     island.IsSlow <- isStillSlow
                     
                     if island.IsSlow then
-                        if Island.isGrounded bodyRepo activeHash geometryRepo &island then
+                        if Island.isGrounded bodyRepo activeHash geometryRepo engine._buffers.StaticSupportCache &island then
                             island.FramesResting <- island.FramesResting + 1
                             
                             if island.FramesResting >= FRAMES_TO_SLEEP && island.CantSleepFrames <= 0 then
