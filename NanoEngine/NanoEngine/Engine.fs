@@ -175,11 +175,12 @@ module Engine =
 
     [<RequireQualifiedAccess>]
     module Utils =
-        let inline removeBySwapBack (item: int) (list: PooledList<int>)=
+        let inline removeBySwapBack<'a when 'a :> IEquatable<'a>> (item: 'a) (list: PooledList<'a>)=
             let idx = list.Span.IndexOf item
             if idx > -1 then
-                list[idx] <- list[list.Count - 1]
-                list.RemoveAt(list.Count - 1)
+                let lastIndex = list.Count - 1
+                list[idx] <- list[lastIndex]
+                list.RemoveAt lastIndex
                 true
             else
                 false
@@ -1473,12 +1474,12 @@ module Engine =
                 }
             
             val private _slots: PooledList<int64>[]
-            val private _lookup: PooledDictionary<int64, int>
+            val private _lookup: PooledDictionary<int64, struct(int * int)>
             val private _currentSlot: int
 
             static member Create() =
-                let slots = Array.init (CONTACT_TTL + 1) (fun _ -> new PooledList<int64>())
-                let lookup = new PooledDictionary<int64, int>()
+                let slots = Array.init (CONTACT_TTL + 1) (fun _ -> new PooledList<_>())
+                let lookup = new PooledDictionary<_, _>()
                 new ExpiringContacts(slots, lookup, 0)
             
             member this.Count = this._lookup.Count
@@ -1486,25 +1487,46 @@ module Engine =
                 this._lookup.Clear()
                 this._slots |> Seq.iter _.Clear()
 
+            member this.TransferTo(target: byref<ExpiringContacts>) =
+                for slotIndex = 0 to this._slots.Length - 1 do
+                    let sourceSlot = this._slots[slotIndex]
+                    if sourceSlot.Count > 0 then
+                        let ttl = (slotIndex - this._currentSlot + this._slots.Length) % this._slots.Length
+                        if ttl > 0 then
+                            for key in sourceSlot.Span do
+                                target.AddOrUpdate(key, ttl)
+                this.Clear()
+                
             member this.AddOrUpdate(key, ttl) =
                 let newTtl = min CONTACT_TTL (max 1 ttl)
-                let newSlot = (this._currentSlot + newTtl) % this._slots.Length
+                let newSlotIndex = (this._currentSlot + newTtl) % this._slots.Length
 
                 match this._lookup.TryGetValue key with
-                | true, oldSlot ->
-                    if oldSlot <> newSlot then
-                        this._slots[oldSlot].Remove key |> ignore
-                        this._slots[newSlot].Add key
-                        this._lookup[key] <- newSlot
+                | true, struct(oldSlotIndex, _) ->
+                    if oldSlotIndex <> newSlotIndex then
+                        this.Remove key |> ignore
+                        let targetSlotList = this._slots[newSlotIndex]
+                        targetSlotList.Add key
+                        this._lookup.Add(key, struct(newSlotIndex, targetSlotList.Count - 1))
                 | false, _ ->
-                    this._slots[newSlot].Add key
-                    this._lookup.Add(key, newSlot)
+                    let targetSlotList = this._slots[newSlotIndex]
+                    targetSlotList.Add key
+                    this._lookup.Add(key, struct(newSlotIndex, targetSlotList.Count - 1))
 
             member this.Remove key =
                 match this._lookup.TryGetValue key with
-                | true, slot ->
+                | true, struct(slotIndex, itemIndexInList) ->
                     this._lookup.Remove key |> ignore
-                    this._slots[slot].Remove key |> ignore
+
+                    let list = this._slots[slotIndex]
+                    let lastIndex = list.Count - 1
+
+                    if itemIndexInList < lastIndex then
+                        let lastItemKey = list[lastIndex]
+                        list[itemIndexInList] <- lastItemKey
+                        this._lookup[lastItemKey] <- struct(slotIndex, itemIndexInList)
+
+                    list.RemoveAt lastIndex
                     true
                 | _ -> false
 
@@ -1515,19 +1537,10 @@ module Engine =
                     for key in expiringNow.Span do
                         this._lookup.Remove key |> ignore
                     expiringNow.Clear()
+
                 new ExpiringContacts(this._slots, this._lookup, newCurrentSlot)
                 
             member this.GetKeys() = this._lookup.Keys :> ICollection<_>
-
-            member this.GetAllContacts() =
-                let result = new PooledList<struct(int64*int)>()
-                for slotIndex = 0 to this._slots.Length - 1 do
-                    let ttl = (slotIndex - this._currentSlot + this._slots.Length) % this._slots.Length
-                    if ttl > 0 then
-                        let slot = this._slots[slotIndex]
-                        for key in slot.Span do
-                            result.Add(struct(key, ttl))
-                result
 
             member this.Dispose() =
                 this._lookup |> Dispose.action
@@ -1538,7 +1551,7 @@ module Engine =
                 
         [<Struct>]
         type T =
-            new(id: int64) =
+            new(id) =
                 {
                     Id = id
                     Bodies = new PooledSet<_>()
@@ -1548,7 +1561,7 @@ module Engine =
                     CantSleepFrames = 2
                     IsSlow = false
                 }
-            val Id: int64
+            val Id: int
             val Bodies: PooledSet<int>
             val mutable ContactTTL : ExpiringContacts
             val mutable IsAwake : bool
@@ -1583,9 +1596,11 @@ module Engine =
                     _islandsToMergePairs : HashSet<struct(int64 * int64)>
                     _islandsToWake: HashSet<int64>
                     _islandsToSleep : HashSet<int64>
-                    _islandsToSplit : HashSet<int64>
+                    _islandsMarkedForSplit : HashSet<int64>
+                    _islandsInvolvedInMerge: HashSet<int64>
+                    _freeIds : List<int>
                     _logger : ILogger
-                    mutable _currentId: int64
+                    mutable _currentId: int
                 }
             member this.ActiveIslandIds = this._activeIslandIds
             member this.SleepingIslandIds = this._sleepingIslandIds
@@ -1613,12 +1628,24 @@ module Engine =
                     _islandsToMergePairs = HashSet()
                     _islandsToWake = HashSet()
                     _islandsToSleep = HashSet()
-                    _islandsToSplit = HashSet()
+                    _islandsMarkedForSplit = HashSet()
+                    _islandsInvolvedInMerge = HashSet()
+                    _freeIds = List()
                     _logger = Log.ForContext<Repo>()
-                    _currentId = -1L
+                    _currentId = -1
                 }
 
-        let inline private newIsland r = new T(Interlocked.Increment &r._currentId)
+        let inline private newIsland r =
+            let newId =
+                match r._freeIds.Count with
+                | 0 -> Interlocked.Increment &r._currentId
+                | count ->
+                    let lastIndex = count - 1
+                    let newId = r._freeIds[lastIndex]
+                    r._freeIds.RemoveAt lastIndex
+                    newId
+                    
+            new T(newId)
             
         let init r =   
             for bodyId in r._bodyRepo |> Body.getKeys do
@@ -1819,10 +1846,10 @@ module Engine =
                         targetIsland.Bodies.Add bodyId |> ignore
                         r._bodyToIslandMap[bodyId] <- targetId
 
-                    use contactsToMove = sourceIsland.ContactTTL.GetAllContacts()
-                    for struct(key, ttl) in contactsToMove.Span do
-                        targetIsland.ContactTTL.AddOrUpdate(key, ttl)
+                    sourceIsland.ContactTTL.TransferTo &targetIsland.ContactTTL
 
+                    r._freeIds.Add sourceIsland.Id
+                    
                     sourceIsland |> Dispose.action
                     if not <| r._removeIslandsBuffer.Contains sourceId then
                        r._removeIslandsBuffer.Add sourceId
@@ -1844,39 +1871,49 @@ module Engine =
                 let root2 = findRoot id2
 
                 if root1 <> root2 then
-                    let mutable island1 = &getIslandRef root1 r
-                    let mutable island2 = &getIslandRef root2 r
-                    if not <| Unsafe.IsNullRef &island1 && not <| Unsafe.IsNullRef &island2 then
-                        requestWakeIsland &island1 r
-                        requestWakeIsland &island2 r
-                    
-                        let struct(sourceRoot, targetRoot) =
-                            if island1.Bodies.Count < island2.Bodies.Count then
-                                (root1, root2)
-                            else
-                                (root2, root1)
+                    // Merge is deferred if a split has already been requested for one of the root islands
+                    // in the same frame. This gives split requests priority if they arrive first
+                    if r._islandsMarkedForSplit.Contains root1 || r._islandsMarkedForSplit.Contains root2 then
+                        r._logger.Information("Merge deferred for ({Id1}, {Id2}) because one root is marked for split", id1, id2)
+                    else
+                        let mutable island1 = &getIslandRef root1 r
+                        let mutable island2 = &getIslandRef root2 r
+                        if not <| Unsafe.IsNullRef &island1 && not <| Unsafe.IsNullRef &island2 then
+                            requestWakeIsland &island1 r
+                            requestWakeIsland &island2 r
+                        
+                            let struct(sourceRoot, targetRoot) =
+                                if island1.Bodies.Count < island2.Bodies.Count then
+                                    (root1, root2)
+                                else
+                                    (root2, root1)
+                                    
+                            let pair = struct (sourceRoot, targetRoot)
+                            if r._islandsToMergePairs.Add pair then
+                                r._logger.Information(
+                                    "Redirected Merge: original ({Id1}, {Id2}) -> final ({SourceRoot}, {TargetRoot})",
+                                    id1,
+                                    id2,
+                                    sourceRoot,
+                                    targetRoot)
                                 
-                        let pair = struct (sourceRoot, targetRoot)
-                        if r._islandsToMergePairs.Add pair then
-                            r._logger.Information(
-                                "Redirected Merge: original ({Id1}, {Id2}) -> final ({SourceRoot}, {TargetRoot})",
-                                id1,
-                                id2,
-                                sourceRoot,
-                                targetRoot)
-                            
-                            r._islandsToMerge.Enqueue pair
+                                r._islandsToMerge.Enqueue pair
 
-                            r._mergeRedirects[sourceRoot] <- targetRoot
+                                r._mergeRedirects[sourceRoot] <- targetRoot
+                                
+                                r._islandsInvolvedInMerge.Add root1 |> ignore
+                                r._islandsInvolvedInMerge.Add root2 |> ignore
                     
         let requestSplit islandId r =
-            if r._islandsToSplit.Add islandId then
+            if r._islandsInvolvedInMerge.Contains islandId then
+                r._logger.Information("Split request for island {IslandId} ignored due to a pending merge", islandId)
+            elif r._islandsMarkedForSplit.Add islandId then
                 r._logger.Information("Request split island: {IslandId}", islandId)
         
         let processIslandChanges buffers r =
-            
             r._mergeRedirects.Clear()
-
+            r._islandsInvolvedInMerge.Clear()
+            
             for islandId in r._islandsToWake do
                 let mutable island = &getIslandRef islandId r
                 if Unsafe.IsNullRef &island then
@@ -1908,7 +1945,7 @@ module Engine =
                 r |> islandMerge sourceId targetId
             r._islandsToMergePairs.Clear()
 
-            for islandIdToSplit in r._islandsToSplit do
+            for islandIdToSplit in r._islandsMarkedForSplit do
                 let mutable originalIsland = &getIslandRef islandIdToSplit r
                 if not <| Unsafe.IsNullRef &originalIsland then
                     use components = findConnectedComponents originalIsland.Bodies originalIsland.ContactTTL
@@ -1956,7 +1993,7 @@ module Engine =
 
                         components |> Seq.iter Dispose.action
                 
-            r._islandsToSplit.Clear()
+            r._islandsMarkedForSplit.Clear()
 
             for islandId in r._islandsToSleep do
                 if r._activeIslandIds.Contains islandId then
