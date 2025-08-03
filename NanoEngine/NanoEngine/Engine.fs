@@ -145,13 +145,13 @@ module Engine =
             if Double.IsNaN angle then
                 Matrix3x3.Identity
             else
-                let axis = axis.Normalize()
-                if axis = Vector3.Zero then
+                if axis.MagnitudeSq() < EPSILON_X2 then
                     Matrix3x3.Identity
                 else
+                    let axis = axis.Normalize()
                     let x, y, z = axis.X, axis.Y, axis.Z
-                    let c = Math.Cos(angle)
-                    let s = Math.Sin(angle)
+                    let c = Math.Cos angle
+                    let s = Math.Sin angle
                     let omc = 1.0 - c
 
                     let xx_omc = x * x * omc
@@ -758,11 +758,11 @@ module Engine =
 
             let zOverlaps = maxA.Z >= minB.Z && minA.Z <= maxB.Z
 
-            if not zOverlaps then
+            if not <| zOverlaps then
                 false
             else
                 let xOverlaps = axisOverlaps minA.X maxA.X minB.X maxB.X WorldLimits.X
-                if not xOverlaps then
+                if not <| xOverlaps then
                     false
                 else
                     axisOverlaps minA.Y maxA.Y minB.Y maxB.Y WorldLimits.Y
@@ -839,7 +839,7 @@ module Engine =
                 let cachedAxis = getAxisByIndex cachedAxisIndex
                 testAxis cachedAxis cachedAxisIndex
 
-            if not colliding then
+            if not <| colliding then
                 struct(CollisionResult(Vector3.Zero), cachedAxisIndex)
             else
                 testAxis o1.R0 0
@@ -1655,6 +1655,7 @@ module Engine =
             interface IDisposable with
                 member this.Dispose() = this.Dispose()
 
+        [<StructLayout(LayoutKind.Sequential, Pack = 1)>]
         type ContactsHolder =
             {
                 mutable Contacts: ExpiringContacts
@@ -1728,10 +1729,12 @@ module Engine =
                     this.HadContactsRemovedThisStep <- false
                     
             member this.Dispose() =
-                this.Bodies |> Dispose.action
-                if not <| isNull this._contactsHolder then
-                    this._contactsHolder.Contacts |> Dispose.action
-                
+                let contactsHolder = this._contactsHolder
+                if not <| isNull contactsHolder then
+                    this._contactsHolder <- null
+                    this.Bodies |> Dispose.action
+                    contactsHolder.Contacts |> Dispose.action
+                    
             interface IDisposable with
                 member this.Dispose() = this.Dispose()
                 
@@ -1770,27 +1773,27 @@ module Engine =
         let getSleepingIslandIds r = r._sleepingIslandIds
         
         let createRepo bodyRepo activeHash sleepingHash =
-                {
-                    _bodyRepo = bodyRepo
-                    _activeHash = activeHash
-                    _sleepingHash = sleepingHash
-                    _mergeRedirects = Dictionary()
-                    _activeIslandIds = HashSet()
-                    _sleepingIslandIds = HashSet()
-                    _allIslands = Dictionary()
-                    _bodyToIslandMap = Dictionary()
-                    _removeIslandsBuffer = List()
-                    _islandsToMerge = Queue()
-                    _islandsToMergePairs = HashSet()
-                    _islandsToWake = HashSet()
-                    _islandsToSleep = HashSet()
-                    _islandsMarkedForSplit = HashSet()
-                    _islandsInvolvedInMerge = HashSet()
-                    _staticSupportCache = Dictionary()
-                    _freeIds = List()
-                    _logger = Log.ForContext<Repo>()
-                    _currentId = -1
-                }
+            {
+                _bodyRepo = bodyRepo
+                _activeHash = activeHash
+                _sleepingHash = sleepingHash
+                _mergeRedirects = Dictionary()
+                _activeIslandIds = HashSet()
+                _sleepingIslandIds = HashSet()
+                _allIslands = Dictionary()
+                _bodyToIslandMap = Dictionary()
+                _removeIslandsBuffer = List()
+                _islandsToMerge = Queue()
+                _islandsToMergePairs = HashSet()
+                _islandsToWake = HashSet()
+                _islandsToSleep = HashSet()
+                _islandsMarkedForSplit = HashSet()
+                _islandsInvolvedInMerge = HashSet()
+                _staticSupportCache = Dictionary()
+                _freeIds = List()
+                _logger = Log.ForContext<Repo>()
+                _currentId = -1
+            }
 
         let inline private newIsland r =
             let newId =
@@ -1899,7 +1902,7 @@ module Engine =
                 if lowestPointZ < PENETRATION_SLOP then
                     hasFoundSupport <- true
       
-                if not hasFoundSupport then
+                if not <| hasFoundSupport then
                     let mutable i = 0
                     while not hasFoundSupport && i < occupiedCells.Length do
                         let cellKey = &occupiedCells[i]
@@ -1983,7 +1986,7 @@ module Engine =
         let addBody bodyId r=
             let mutable isFound = false
             let islandId = &CollectionsMarshal.GetValueRefOrAddDefault(r._bodyToIslandMap, bodyId, &isFound)
-            if not isFound then
+            if not <| isFound then
                 let newIsland = r |> newIsland
                 r._allIslands.Add(newIsland.Id, newIsland)
                 islandId <- newIsland.Id
@@ -2005,7 +2008,7 @@ module Engine =
             
         let requestWakeIsland (island: byref<T>) r =
             island.FramesResting <- 0
-            if not island.IsAwake && r._islandsToWake.Add island.Id then
+            if not <| island.IsAwake && r._islandsToWake.Add island.Id then
                 r._logger.Information("Request wake island: {IslandId}", island.Id)
             
         let islandMerge sourceId targetId r =
@@ -2094,6 +2097,8 @@ module Engine =
                 r._logger.Information("Request split island: {IslandId}", islandId)
         
         let processIslandChanges geometryRepo buffers r =
+            
+            r._staticSupportCache.Clear()
             r._mergeRedirects.Clear()
             r._islandsInvolvedInMerge.Clear()
             
@@ -2386,7 +2391,7 @@ module Engine =
                 
             let mutable isFound = false
             for otherId in SpatialHash.query checkPointCellKey hash do
-                if not isFound && otherId <> body.Id then
+                if not <| isFound && otherId <> body.Id then
                     let otherBody = &Body.getRef otherId bodyRepo
                     if not <| Unsafe.IsNullRef &otherBody && not <| otherBody.IsFallingOver then
                         if isPointInsideOBB checkPoint otherBody.Position otherBody.Dimensions otherBody.Orientation then
@@ -2400,7 +2405,7 @@ module Engine =
             activeHash
             sleepingHash
             (point: Vector3) =
-            if point.Z <= 0.0 then
+            if point.Z <= PENETRATION_SLOP then
                 true
             else
                 let cellKey = point |> Grid.convertWorldToSubPrismCoords |> SubPrismKey.pack
@@ -2423,30 +2428,32 @@ module Engine =
             if checkSinglePoint geometryRepo bodyRepo &body activeHash sleepingHash checkPoint then
                 true
             else
-                let margin = (max body.Dimensions.X body.Dimensions.Y) + 1.0
+                let bodyHalfExtent = (max body.Dimensions.X body.Dimensions.Y) / 2.0
+                let maxSupporterHalfExtent = MAX_DIMENSION / 2.0
+                let safeMargin = bodyHalfExtent + maxSupporterHalfExtent + PENETRATION_SLOP
 
-                let nearMinX = checkPoint.X < margin
-                let nearMaxX = checkPoint.X > (WorldLimits.X - margin)
-                let nearMinY = checkPoint.Y < margin
-                let nearMaxY = checkPoint.Y > (WorldLimits.Y - margin)
+                let nearMinX = checkPoint.X < safeMargin
+                let nearMaxX = checkPoint.X > (WorldLimits.X - safeMargin)
+                let nearMinY = checkPoint.Y < safeMargin
+                let nearMaxY = checkPoint.Y > (WorldLimits.Y - safeMargin)
 
                 let mutable foundSupportInGhost = false
 
                 if nearMinX then
                     foundSupportInGhost <- foundSupportInGhost || checkSinglePoint geometryRepo bodyRepo &body activeHash sleepingHash (checkPoint + Vector3(WorldLimits.X, 0.0, 0.0))
-                if not foundSupportInGhost && nearMaxX then
+                if not <| foundSupportInGhost && nearMaxX then
                     foundSupportInGhost <- foundSupportInGhost || checkSinglePoint geometryRepo bodyRepo &body activeHash sleepingHash (checkPoint - Vector3(WorldLimits.X, 0.0, 0.0))
-                if not foundSupportInGhost && nearMinY then
+                if not <| foundSupportInGhost && nearMinY then
                     foundSupportInGhost <- foundSupportInGhost || checkSinglePoint geometryRepo bodyRepo &body activeHash sleepingHash (checkPoint + Vector3(0.0, WorldLimits.Y, 0.0))
-                if not foundSupportInGhost && nearMaxY then
+                if not <| foundSupportInGhost && nearMaxY then
                     foundSupportInGhost <- foundSupportInGhost || checkSinglePoint geometryRepo bodyRepo &body activeHash sleepingHash (checkPoint - Vector3(0.0, WorldLimits.Y, 0.0))
-                if not foundSupportInGhost && nearMinX && nearMinY then
+                if not <| foundSupportInGhost && nearMinX && nearMinY then
                     foundSupportInGhost <- foundSupportInGhost || checkSinglePoint geometryRepo bodyRepo &body activeHash sleepingHash (checkPoint + Vector3(WorldLimits.X, WorldLimits.Y, 0.0))
-                if not foundSupportInGhost && nearMaxX && nearMinY then
+                if not <| foundSupportInGhost && nearMaxX && nearMinY then
                     foundSupportInGhost <- foundSupportInGhost || checkSinglePoint geometryRepo bodyRepo &body activeHash sleepingHash (checkPoint + Vector3(-WorldLimits.X, WorldLimits.Y, 0.0))
-                if not foundSupportInGhost && nearMinX && nearMaxY then
+                if not <| foundSupportInGhost && nearMinX && nearMaxY then
                     foundSupportInGhost <- foundSupportInGhost || checkSinglePoint geometryRepo bodyRepo &body activeHash sleepingHash (checkPoint + Vector3(WorldLimits.X, -WorldLimits.Y, 0.0))
-                if not foundSupportInGhost && nearMaxX && nearMaxY then
+                if not <| foundSupportInGhost && nearMaxX && nearMaxY then
                     foundSupportInGhost <- foundSupportInGhost || checkSinglePoint geometryRepo bodyRepo &body activeHash sleepingHash (checkPoint + Vector3(-WorldLimits.X, -WorldLimits.Y, 0.0))
 
                 foundSupportInGhost
@@ -2942,7 +2949,7 @@ module Engine =
 
             let zProx = (maxA.Z + expansion) >= (minB.Z - expansion) && (minA.Z - expansion) <= (maxB.Z + expansion)
 
-            if not zProx then
+            if not <| zProx then
                 false
             else
                 let inline axisProximity minValA maxValA minValB maxValB worldSize =
@@ -2958,7 +2965,7 @@ module Engine =
 
                     abs(dist) <= (extentA + extentB + expansion)
 
-                if not (axisProximity minA.X maxA.X minB.X maxB.X WorldLimits.X) then
+                if not <| axisProximity minA.X maxA.X minB.X maxB.X WorldLimits.X then
                     false
                 else
                     axisProximity minA.Y maxA.Y minB.Y maxB.Y WorldLimits.Y
