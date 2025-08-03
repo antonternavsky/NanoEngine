@@ -1638,12 +1638,13 @@ module Engine =
             member this.NextStep() =
                 let newCurrentSlot = (this._currentSlot + 1) % this._slots.Length
                 let expiringNow = this._slots[newCurrentSlot]
-                if expiringNow.Count > 0 then
+                let contactsWereRemoved = expiringNow.Count > 0
+                if contactsWereRemoved then
                     for key in expiringNow.Span do
                         this._lookup.Remove key |> ignore
                     expiringNow.Clear()
 
-                new ExpiringContacts(this._slots, this._lookup, newCurrentSlot)
+                struct(new ExpiringContacts(this._slots, this._lookup, newCurrentSlot), contactsWereRemoved)
                 
             member this.GetKeys() = this._lookup.Keys :> ICollection<_>
 
@@ -1671,6 +1672,7 @@ module Engine =
                     CantSleepFrames = 2
                     IsSlow = false
                     IsGrounded = false
+                    HadContactsRemovedThisStep = false
                 }
             val Id: int
             val Bodies: PooledSet<int>
@@ -1680,6 +1682,7 @@ module Engine =
             val mutable CantSleepFrames : int
             val mutable IsSlow : bool
             val mutable IsGrounded : bool
+            val mutable HadContactsRemovedThisStep : bool
             
             member inline this.EnsureContactsExist() =
                 if isNull this._contactsHolder then
@@ -1717,8 +1720,12 @@ module Engine =
                     sourceIsland._contactsHolder.Contacts.TransferTo &this._contactsHolder.Contacts
                     
             member this.NextStep() =
-                if not <| isNull this._contactsHolder && this.IsSlow then
-                    this._contactsHolder.Contacts <-this._contactsHolder.Contacts.NextStep()
+                if this.IsSlow && not <| isNull this._contactsHolder then
+                    let struct(newContacts, contactsWereRemoved) = this._contactsHolder.Contacts.NextStep()
+                    this._contactsHolder.Contacts <- newContacts
+                    this.HadContactsRemovedThisStep <- contactsWereRemoved
+                else
+                    this.HadContactsRemovedThisStep <- false
                     
             member this.Dispose() =
                 this.Bodies |> Dispose.action
@@ -1924,6 +1931,14 @@ module Engine =
             
             if island.Bodies.Count = 0 then
                 true
+            elif island.Bodies.Count = 1 then
+                let bodyId = island.Bodies.GetEnumerator().Current
+                let body = &Body.getRef bodyId bodyRepo
+                if Unsafe.IsNullRef &body then
+                    false
+                else
+                    let occupiedCells = SpatialHash.getOccupiedCells bodyId activeHash
+                    hasStaticSupport &body occupiedCells geometryRepo r
             else
                 use anchors = new PooledList<int>()
                 for bodyId in island.Bodies do
@@ -3324,7 +3339,7 @@ module Engine =
             for islandId in islandRepo |> Island.getActiveIslandIds do
                 let island = &Island.getIslandRef islandId islandRepo
                 if island.IsAwake then
-                    if island.Bodies.Count > 1 && island.ContactCount < island.Bodies.Count - 1 then
+                    if island.Bodies.Count > 1 && island.HadContactsRemovedThisStep && island.ContactCount < island.Bodies.Count - 1 then
                         islandRepo |> Island.requestSplit island.Id
                     let mutable isStillSlow = true
                     let mutable enumerator = island.Bodies.GetEnumerator()
