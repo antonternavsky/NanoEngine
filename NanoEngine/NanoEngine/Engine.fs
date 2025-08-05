@@ -3408,16 +3408,18 @@ module Engine =
             for islandId in islandRepo |> Island.getActiveIslandIds do
                 let island = &Island.getIslandRef islandId islandRepo
                 for bodyId in island.Bodies do
+                    let mutable isFound = false
+                    let newSlot = &CollectionsMarshal.GetValueRefOrAddDefault(activeAABBCache, bodyId, &isFound)
                     let body = &Body.getRef bodyId bodyRepo
-                    let aabb = Collision.getAABB body.Position body.Dimensions body.Orientation
-                    activeAABBCache.Add(bodyId, aabb)
+                    newSlot <- Collision.getAABB body.Position body.Dimensions body.Orientation
             
             for islandId in islandRepo |> Island.getSleepingIslandIds do
                 let island = &Island.getIslandRef islandId islandRepo
                 for bodyId in island.Bodies do
+                    let mutable isFound = false
+                    let newSlot = &CollectionsMarshal.GetValueRefOrAddDefault(sleepingAABBCache, bodyId, &isFound)
                     let body = &Body.getRef bodyId bodyRepo
-                    let aabb = Collision.getAABB body.Position body.Dimensions body.Orientation
-                    sleepingAABBCache.Add(bodyId, aabb)
+                    newSlot <- Collision.getAABB body.Position body.Dimensions body.Orientation
                     
             for islandId in islandRepo |> Island.getActiveIslandIds do
                 let island = &Island.getIslandRef islandId islandRepo
@@ -3443,7 +3445,7 @@ module Engine =
                                 let contactKey = ContactKey.key id1 id2
                                 if checkedBodyPairs.Add contactKey then
                                     let b2 = &Body.getRef id2 bodyRepo
-                                    let struct(minB, maxB) = activeAABBCache[id2]
+                                    let struct(minB, maxB) = CollectionsMarshal.GetValueRefOrNullRef(activeAABBCache, id2)                               
                                     resolveDynamicDynamicCollision
                                         &b1
                                         &b2
@@ -3458,7 +3460,7 @@ module Engine =
                         for sleepingId in SpatialHash.query cellKey sleepingHash do
                             if processedSleeping.Add sleepingId then
                                 let b2 = &Body.getRef sleepingId bodyRepo
-                                let struct(minB, maxB) = sleepingAABBCache[sleepingId]
+                                let struct(minB, maxB) = CollectionsMarshal.GetValueRefOrNullRef(sleepingAABBCache, sleepingId)
                                 resolveDynamicSleepingCollision
                                     &b1
                                     &b2
