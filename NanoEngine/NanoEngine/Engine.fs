@@ -639,6 +639,13 @@ module Engine =
 
             [| for i in 0..5 -> precomputePrismShape i |]
         
+        let private _precomputedPrismAABBs =
+            [|
+                for i in 0..11 ->
+                    let struct(orient, dims) = _precomputedPrismShapes[i % 6]
+                    Collision.getAABB Vector3.Zero dims orient
+            |]
+            
         let private _vertexes =
             [|
                 Vector3(HEX_RADIUS * cos (double 0 * PI / 3.0), HEX_RADIUS * sin (double 0 * PI / 3.0), 0.0)
@@ -742,8 +749,9 @@ module Engine =
         let inline getPrismSpaceByKey key  = key |> SubPrismKey.unpack |> getPrismSpace
         
         let inline private getTriangularPrismAABB (coords: SubPrismCoords) =
-            let struct(prismPos, prismDims, prismOrient) = getPrismSpace coords
-            Collision.getAABB prismPos prismDims prismOrient
+            let prismCenter = coords |> getTriangularPrismCenter
+            let struct(minLocal, maxLocal) = _precomputedPrismAABBs[coords.SubIndex]
+            struct(minLocal + prismCenter, maxLocal + prismCenter)
 
         let inline private fillGridFromCorners
             (corners: Span<Vector3>)
@@ -783,20 +791,21 @@ module Engine =
                                 let inline checkAndAddSubPrisms (startIndex: int) (endIndex: int) =
                                     for sub_idx = startIndex to endIndex do
                                         let subPrismCoords = SubPrismCoords.Normalize(q, r, z, sub_idx)
-                                        let struct(prismPos, prismDims, prismOrient) = subPrismCoords |> getPrismSpace
-
-                                        let result =
-                                            Collision.checkCollisionSAT
-                                                p
-                                                d
-                                                o
-                                                prismPos
-                                                prismDims
-                                                prismOrient
-                                                    
-                                        if result.AreColliding then
-                                            let key = subPrismCoords |> SubPrismKey.pack
-                                            filter.Add key |> ignore
+                                        let struct(minPrism, maxPrism) = subPrismCoords |> getTriangularPrismAABB
+                                        if Collision.checkCollisionAABB minAABB maxAABB minPrism maxPrism then
+                                            let struct(prismPos, prismDims, prismOrient) = subPrismCoords |> getPrismSpace
+                                            let result =
+                                                Collision.checkCollisionSAT
+                                                    p
+                                                    d
+                                                    o
+                                                    prismPos
+                                                    prismDims
+                                                    prismOrient
+                                                        
+                                            if result.AreColliding then
+                                                let key = subPrismCoords |> SubPrismKey.pack
+                                                filter.Add key |> ignore
                                 
                                 if overlapsBottomHalf then
                                     checkAndAddSubPrisms 0 5
