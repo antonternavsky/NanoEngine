@@ -317,104 +317,6 @@ module Engine =
             delta.Y <- relativeY delta.Y
     
     [<RequireQualifiedAccess>]
-    module Body =
-        type BodyType =
-            | Generic = 0uy
-            | SolidPrism = 1uy
-            | Tree = 2uy
-            | Bush = 3uy
-
-        [<Struct; StructLayout(LayoutKind.Sequential)>]
-        type T =
-            new(
-                id,
-                bodyType,
-                mass,
-                dimensions : Vector3,
-                orientation,
-                position,
-                velocity,
-                supportCoords,
-                friction) =
-                {
-                    Id = id
-                    BodyType = bodyType
-                    Mass = mass
-                    InvMass = if mass <= EPSILON then 0.0 else 1.0 / mass
-                    _dimensions =
-                        Vector3(
-                            min MAX_DIMENSION (max dimensions.X MIN_DIMENSION_THRESHOLD),
-                            min MAX_DIMENSION (max dimensions.Y MIN_DIMENSION_THRESHOLD),
-                            min MAX_DIMENSION (max dimensions.Z MIN_DIMENSION_THRESHOLD))
-                    Orientation = orientation
-                    Position = position
-                    Velocity = velocity
-                    SupportCoords = supportCoords
-                    FrictionCoefficient = friction
-                    IsFallingOver = false
-                    FallRotationProgress = 0.0
-                    FallDuration = 0.0
-                    FallRotationAxis = Vector3.Zero
-                    FallInitialOrientation = Matrix3x3.Identity
-                    FallPivotPoint = Vector3.Zero
-                    InitialCenterOffsetFromPivot = Vector3.Zero
-                    IsForceFalling = false
-                    IsSnappedToGrid = false
-                    IsGravityEnabled = true
-                }
-
-            val Id: int
-            val BodyType: BodyType
-            val Mass: double
-            val mutable InvMass: double
-            val mutable Position: Vector3
-            val mutable Velocity: Vector3
-            val mutable private _dimensions: Vector3
-            member this.Dimensions
-                with get() = this._dimensions
-                and set (value: Vector3) =
-                    this._dimensions <-
-                        Vector3(
-                            min MAX_DIMENSION (max value.X MIN_DIMENSION_THRESHOLD),
-                            min MAX_DIMENSION (max value.Y MIN_DIMENSION_THRESHOLD),
-                            min MAX_DIMENSION (max value.Z MIN_DIMENSION_THRESHOLD))
-                        
-            val mutable Orientation: Matrix3x3
-            val SupportCoords: SubPrismCoords
-            val FrictionCoefficient: double
-            val mutable IsFallingOver: bool
-            val mutable FallRotationProgress: double
-            val mutable FallDuration: double
-            val mutable FallRotationAxis: Vector3
-            val mutable FallInitialOrientation: Matrix3x3
-            val mutable FallPivotPoint: Vector3
-            val mutable InitialCenterOffsetFromPivot: Vector3
-            val mutable IsForceFalling: bool
-            val mutable IsSnappedToGrid : bool
-            val mutable IsGravityEnabled : bool
-      
-        type Repo =
-            private
-                {
-                    _bodies : Dictionary<int, T>
-                    mutable _currentBodyId: int
-                }
-        
-        let nextId r = Interlocked.Increment &r._currentBodyId
-        let getAll r  : IReadOnlyDictionary<_, _> = r._bodies 
-        let createRepo() =
-            {
-                _bodies = Dictionary<_, _>()
-                _currentBodyId = 0
-            }
-        
-        let getRef id r = &CollectionsMarshal.GetValueRefOrNullRef(r._bodies, id)
-        let getKeys r = r._bodies.Keys
-        let tryAdd (body: inref<T>) r = r._bodies.TryAdd(body.Id, body)
-        let remove id r = r._bodies.Remove id
-    
-    
-    [<RequireQualifiedAccess>]
     module Collision =
 
         let getAABB (position: Vector3) (dimensions: Vector3) (orientation: Matrix3x3) =
@@ -586,6 +488,117 @@ module Engine =
             let struct(result, _) = checkCollisionSATWithCachedAxis p1 d1 o1 p2 d2 o2 -1
             result
     
+    
+    [<RequireQualifiedAccess>]
+    module Body =
+        type BodyType =
+            | Generic = 0uy
+            | SolidPrism = 1uy
+            | Tree = 2uy
+            | Bush = 3uy
+
+        [<Struct; StructLayout(LayoutKind.Sequential)>]
+        type T =
+            new(
+                id,
+                bodyType,
+                mass,
+                dimensions : Vector3,
+                orientation,
+                position,
+                velocity,
+                supportCoords,
+                friction) =
+                {
+                    Id = id
+                    BodyType = bodyType
+                    Mass = mass
+                    InvMass = if mass <= EPSILON then 0.0 else 1.0 / mass
+                    _dimensions =
+                        Vector3(
+                            min MAX_DIMENSION (max dimensions.X MIN_DIMENSION_THRESHOLD),
+                            min MAX_DIMENSION (max dimensions.Y MIN_DIMENSION_THRESHOLD),
+                            min MAX_DIMENSION (max dimensions.Z MIN_DIMENSION_THRESHOLD))
+                    Orientation = orientation
+                    Position = position
+                    Velocity = velocity
+                    SupportCoords = supportCoords
+                    FrictionCoefficient = friction
+                    IsFallingOver = false
+                    FallRotationProgress = 0.0
+                    FallDuration = 0.0
+                    FallRotationAxis = Vector3.Zero
+                    FallInitialOrientation = Matrix3x3.Identity
+                    FallPivotPoint = Vector3.Zero
+                    InitialCenterOffsetFromPivot = Vector3.Zero
+                    IsForceFalling = false
+                    IsSnappedToGrid = false
+                    IsGravityEnabled = true
+                    MinAABB = Vector3.Zero
+                    MaxAABB = Vector3.Zero
+                }
+
+            val Id: int
+            val BodyType: BodyType
+            val Mass: double
+            val mutable InvMass: double
+            val mutable Position: Vector3
+            val mutable Velocity: Vector3
+            val mutable private _dimensions: Vector3
+            member this.Dimensions
+                with get() = this._dimensions
+                and set (value: Vector3) =
+                    this._dimensions <-
+                        Vector3(
+                            min MAX_DIMENSION (max value.X MIN_DIMENSION_THRESHOLD),
+                            min MAX_DIMENSION (max value.Y MIN_DIMENSION_THRESHOLD),
+                            min MAX_DIMENSION (max value.Z MIN_DIMENSION_THRESHOLD))
+                        
+            val mutable Orientation: Matrix3x3
+            val SupportCoords: SubPrismCoords
+            val FrictionCoefficient: double
+            val mutable IsFallingOver: bool
+            val mutable FallRotationProgress: double
+            val mutable FallDuration: double
+            val mutable FallRotationAxis: Vector3
+            val mutable FallInitialOrientation: Matrix3x3
+            val mutable FallPivotPoint: Vector3
+            val mutable InitialCenterOffsetFromPivot: Vector3
+            val mutable IsForceFalling: bool
+            val mutable IsSnappedToGrid : bool
+            val mutable IsGravityEnabled : bool
+            val mutable MinAABB: Vector3
+            val mutable MaxAABB: Vector3
+    
+        let inline updateAABB (body: byref<T>) =
+            let struct(minCorner, maxCorner) =
+                Collision.getAABB
+                    body.Position
+                    body.Dimensions
+                    body.Orientation
+            body.MinAABB <- minCorner
+            body.MaxAABB <- maxCorner
+        
+        type Repo =
+            private
+                {
+                    _bodies : Dictionary<int, T>
+                    mutable _currentBodyId: int
+                }
+        
+        let nextId r = Interlocked.Increment &r._currentBodyId
+        let getAll r  : IReadOnlyDictionary<_, _> = r._bodies 
+        let createRepo() =
+            {
+                _bodies = Dictionary<_, _>()
+                _currentBodyId = 0
+            }
+        
+        let getRef id r = &CollectionsMarshal.GetValueRefOrNullRef(r._bodies, id)
+        let getKeys r = r._bodies.Keys
+        let tryAdd (body: inref<T>) r = r._bodies.TryAdd(body.Id, body)
+        let remove id r = r._bodies.Remove id
+    
     [<RequireQualifiedAccess>]
     module Grid =
         let private _precomputedPrismShapes =
@@ -658,11 +671,11 @@ module Engine =
             if diffX > diffY && diffX > diffZ then
                 struct (-int roundedY - int roundedZ, int roundedZ)
             elif diffY > diffZ then
-                struct (int roundedX, -int roundedX - int roundedY)
+                struct (int roundedX, int roundedZ)
             else
                 let finalR = -int roundedX - int roundedY
                 struct (int roundedX, finalR)
-
+         
         let inline convertHexToWorld q r z hexHeight =
             let x = HEX_RADIUS * SQRT3 * (double q + 0.5 * double (r &&& 1))
             let y = HEX_RADIUS * 1.5 * double r
@@ -676,7 +689,8 @@ module Engine =
             let guessHexCenter = convertHexToWorld initialGuessQ initialGuessR 0 0.0
 
             let mutable relativePos = pos - guessHexCenter
-
+            WorldLimits.relative &relativePos
+            
             let struct (fracQ_stable, fracR_stable) = convertWorldToFractionalAxial relativePos.X relativePos.Y
             let struct (offsetQ, offsetR) = cubeRound fracQ_stable (-fracQ_stable - fracR_stable) fracR_stable
 
@@ -687,6 +701,9 @@ module Engine =
             struct(finalQ, finalR, finalZIndex)
 
         let convertWorldToSubPrismCoords (pos: Vector3)=
+            let mutable pos = pos
+            WorldLimits.wrapPosition &pos
+
             let struct (finalQ, finalR, finalZIndex) = convertWorldToRawGridCoords pos
 
             let rawHexCenter = convertHexToWorld finalQ finalR 0 0.0
@@ -1214,9 +1231,7 @@ module Engine =
             CollisionProcessedSleeping: HashSet<int>
             CollisionProcessedStatic: HashSet<uint64>
             CollisionProcessedFlora: HashSet<int>
-            CollisionActiveAABBCache: Dictionary<int, struct(Vector3 * Vector3)>
-            CollisionSleepingAABBCache: Dictionary<int, struct(Vector3 * Vector3)>
-            
+
             BodiesToAdd: PooledList<Body.T>
             BodiesToRemoveIds: PooledList<int>
             FloraToRemoveIds: PooledList<int>
@@ -1247,9 +1262,7 @@ module Engine =
             this.CollisionProcessedSleeping.Clear()
             this.CollisionProcessedStatic.Clear()
             this.CollisionProcessedFlora.Clear()
-            this.CollisionActiveAABBCache.Clear()
-            this.CollisionSleepingAABBCache.Clear()
-            
+
             this.BodiesToAdd.Clear()
             this.BodiesToRemoveIds.Clear()
             this.FloraToRemoveIds.Clear()
@@ -1268,9 +1281,7 @@ module Engine =
                 CollisionProcessedSleeping = HashSet()
                 CollisionProcessedStatic = HashSet()
                 CollisionProcessedFlora = HashSet()
-                CollisionActiveAABBCache = Dictionary<_, _>()
-                CollisionSleepingAABBCache = Dictionary<_, _>()
-                
+
                 BodiesToAdd = new PooledList<_>()
                 BodiesToRemoveIds = new PooledList<_>()
                 FloraToRemoveIds = new PooledList<_>()
@@ -2591,8 +2602,9 @@ module Engine =
             else
                 let h = body.Dimensions / 2.0
                 let bottomCenterOffset = body.Orientation * Vector3(0.0, 0.0, -h.Z)
-                let projectedCenterOfMass = body.Position + bottomCenterOffset
-  
+                let mutable projectedCenterOfMass = body.Position + bottomCenterOffset
+                WorldLimits.wrapPosition &projectedCenterOfMass
+                
                 let isCenterOfMassSupported = isPointSupported geometryRepo bodyRepo &body activeHash sleepingHash projectedCenterOfMass
                 if isCenterOfMassSupported then
                     ValueNone
@@ -3086,6 +3098,7 @@ module Engine =
                             body.Position <- finalPosition
                             body.Velocity <- Vector3.Zero
                             WorldLimits.wrapPosition &body.Position
+                            Body.updateAABB &body
 
         let inline private checkBodyProximity(minA: Vector3) (maxA: Vector3) (minB: Vector3) (maxB: Vector3) =
             let expansion = PENETRATION_SLOP * 4.0
@@ -3175,13 +3188,14 @@ module Engine =
         let private resolveDynamicDynamicCollision
             (b1: byref<Body.T>)
             (b2: byref<Body.T>)
-            (minA: inref<Vector3>)
-            (maxA: inref<Vector3>)
-            (minB: inref<Vector3>)
-            (maxB: inref<Vector3>)
             islandRepo
             dt =
-                
+            
+            let minA = b1.MinAABB
+            let maxA = b1.MaxAABB
+            let minB = b2.MinAABB
+            let maxB = b2.MaxAABB
+            
             if Collision.checkCollisionAABB minA maxA minB maxB then
                 let island1 = &Island.getIslandRefForBody b1.Id islandRepo
                 let contactKey = ContactKey.key b1.Id b2.Id
@@ -3243,12 +3257,13 @@ module Engine =
         let private resolveDynamicSleepingCollision
             (b1: byref<Body.T>)
             (b2: byref<Body.T>)
-            (minA: inref<Vector3>)
-            (maxA: inref<Vector3>)
-            (minB: inref<Vector3>)
-            (maxB: inref<Vector3>)
             islandRepo
             dt =
+            let minA = b1.MinAABB
+            let maxA = b1.MaxAABB
+            let minB = b2.MinAABB
+            let maxB = b2.MaxAABB
+            
             if Collision.checkCollisionAABB minA maxA minB maxB then
                 let island1 = &Island.getIslandRefForBody b1.Id islandRepo
                 let contactKey = ContactKey.key b1.Id b2.Id
@@ -3394,33 +3409,13 @@ module Engine =
             let processedSleeping = buffers.CollisionProcessedSleeping
             let processedStatic = buffers.CollisionProcessedStatic
             let processedFlora = buffers.CollisionProcessedFlora
-            let activeAABBCache = buffers.CollisionActiveAABBCache
-            let sleepingAABBCache = buffers.CollisionSleepingAABBCache
-            
+
             checkedBodyPairs.Clear()
             destroyedFlora.Clear()
             processedSleeping.Clear()
             processedStatic.Clear()
             processedFlora.Clear()
-            activeAABBCache.Clear()
-            sleepingAABBCache.Clear()
-            
-            for islandId in islandRepo |> Island.getActiveIslandIds do
-                let island = &Island.getIslandRef islandId islandRepo
-                for bodyId in island.Bodies do
-                    let mutable isFound = false
-                    let newSlot = &CollectionsMarshal.GetValueRefOrAddDefault(activeAABBCache, bodyId, &isFound)
-                    let body = &Body.getRef bodyId bodyRepo
-                    newSlot <- Collision.getAABB body.Position body.Dimensions body.Orientation
-            
-            for islandId in islandRepo |> Island.getSleepingIslandIds do
-                let island = &Island.getIslandRef islandId islandRepo
-                for bodyId in island.Bodies do
-                    let mutable isFound = false
-                    let newSlot = &CollectionsMarshal.GetValueRefOrAddDefault(sleepingAABBCache, bodyId, &isFound)
-                    let body = &Body.getRef bodyId bodyRepo
-                    newSlot <- Collision.getAABB body.Position body.Dimensions body.Orientation
-                    
+
             for islandId in islandRepo |> Island.getActiveIslandIds do
                 let island = &Island.getIslandRef islandId islandRepo
                 for id1 in island.Bodies do
@@ -3433,8 +3428,6 @@ module Engine =
                     processedStatic.Clear()
                     processedFlora.Clear()
 
-                    let struct(minA, maxA) = activeAABBCache[id1]
-                    
                     let occupiedCellsForBody1 = SpatialHash.getOccupiedCells id1 activeHash
                     for i = 0 to occupiedCellsForBody1.Length - 1 do
                         let cellKey = occupiedCellsForBody1[i]
@@ -3444,15 +3437,10 @@ module Engine =
                             if id2 > id1 then
                                 let contactKey = ContactKey.key id1 id2
                                 if checkedBodyPairs.Add contactKey then
-                                    let b2 = &Body.getRef id2 bodyRepo
-                                    let struct(minB, maxB) = CollectionsMarshal.GetValueRefOrNullRef(activeAABBCache, id2)                               
+                                    let b2 = &Body.getRef id2 bodyRepo                           
                                     resolveDynamicDynamicCollision
                                         &b1
                                         &b2
-                                        &minA
-                                        &maxA
-                                        &minB
-                                        &maxB
                                         islandRepo
                                         sub_dt
 
@@ -3460,14 +3448,9 @@ module Engine =
                         for sleepingId in SpatialHash.query cellKey sleepingHash do
                             if processedSleeping.Add sleepingId then
                                 let b2 = &Body.getRef sleepingId bodyRepo
-                                let struct(minB, maxB) = CollectionsMarshal.GetValueRefOrNullRef(sleepingAABBCache, sleepingId)
                                 resolveDynamicSleepingCollision
                                     &b1
                                     &b2
-                                    &minA
-                                    &maxA
-                                    &minB
-                                    &maxB
                                     islandRepo
                                     sub_dt
 
@@ -3585,6 +3568,7 @@ module Engine =
                                     for bodyId in island.Bodies do
                                         let body = &Body.getRef bodyId bodyRepo
                                         if not <| Unsafe.IsNullRef &body then
+                                            Body.updateAABB &body
                                             body.Velocity <- Vector3.Zero
                                     Island.requestSleep &island islandRepo
                                 else 
@@ -3640,13 +3624,15 @@ module Engine =
                 for bodyId in island.Bodies do
                     let body = &Body.getRef bodyId engine._bodyRepo
                     if not <| Unsafe.IsNullRef &body then
+                        Body.updateAABB &body
                         SpatialHash.update &body engine._buffers engine._activeHash
                         if not <| body.IsFallingOver && not <| body.IsSnappedToGrid && body.IsGravityEnabled then
                             body.Velocity <- body.Velocity + GRAVITY * engine._dt
-                                
+
             for body in engine._buffers.BodiesToAdd.Span do
                  let foundBody = &Body.getRef body.Id engine._bodyRepo
                  if not <| Unsafe.IsNullRef &foundBody then
+                    Body.updateAABB &foundBody
                     SpatialHash.add &foundBody engine._buffers engine._activeHash
 
             let resolutionPasses = 8

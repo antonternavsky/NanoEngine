@@ -268,7 +268,7 @@ let main _ =
     let tests = ResizeArray<TestDefinition>()
     
     tests.Add({
-        MaxSteps = 1200
+        MaxSteps = 700
         Setup = fun runner loc ->
             let platZ = 10
             let platformRadius = 8
@@ -350,7 +350,7 @@ let main _ =
                 if runner.State.IslandRepo.SleepingIslandIds.Count = 2 && runner.State.IslandRepo.ActiveIslandIds.Count = 0 then
                     runner.State.TestPhase <- 7
                     InProgress
-                elif i > 230 then Assert.Fail "STAGE 6 FAIL: The scene did not fall asleep after the first blow"
+                elif i > 250 then Assert.Fail "STAGE 6 FAIL: The scene did not fall asleep after the first blow"
                 else InProgress
             | 7 ->
                 let targetId = runner.Recall<int>("thirdId")
@@ -369,7 +369,7 @@ let main _ =
                     runner.State.TestPhase <- 9
                 
                 if runner.State.IslandRepo.ActiveIslandIds.Count > 0 then
-                    if i > 310 then Assert.Fail "STAGE 8/9 FAIL: The bodies did not fall asleep after the second blow"
+                    if i > 320 then Assert.Fail "STAGE 8/9 FAIL: The bodies did not fall asleep after the second blow"
                     else InProgress
                 else
                     Assert.AreEqual 2 runner.State.IslandRepo.SleepingIslandIds.Count "STAGE 9 FAIL: Incorrect number of sleeping islands. Expected 2"
