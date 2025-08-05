@@ -13,7 +13,8 @@ open Serilog
 
 module Engine =
     let [<Literal>] PENETRATION_SLOP = 0.01
-    let [<Literal>] CORRECTION_PERCENT = 0.4
+    let [<Literal>] MAX_PENETRATION = PENETRATION_SLOP * 4.0
+    let [<Literal>] CORRECTION_PERCENT = 0.65
     let [<Literal>] RESTITUTION_THRESHOLD = 2.0
     let [<Literal>] EPSILON = 1e-6
     let [<Literal>] EPSILON_X2 = EPSILON * EPSILON
@@ -411,304 +412,7 @@ module Engine =
         let getKeys r = r._bodies.Keys
         let tryAdd (body: inref<T>) r = r._bodies.TryAdd(body.Id, body)
         let remove id r = r._bodies.Remove id
-        
-    [<RequireQualifiedAccess>]
-    module Grid =
-        let inline convertWorldToFractionalAxial worldX worldY =
-            let q = (SQRT3 / 3.0 * worldX - 1.0 / 3.0 * worldY) / HEX_RADIUS
-            let r = (2.0 / 3.0 * worldY) / HEX_RADIUS
-            struct (q, r)
-
-        let inline cubeRound (fracX: double) (fracY: double) (fracZ: double) =
-            let roundedX = Math.Round fracX
-            let roundedY = Math.Round fracY
-            let roundedZ = Math.Round fracZ
-
-            let diffX = abs (roundedX - fracX)
-            let diffY = abs (roundedY - fracY)
-            let diffZ = abs (roundedZ - fracZ)
-
-            // Rounding correction: the axis with the largest change due to rounding is
-            // recalculated from the other two to preserve the x+y+z=0 invariant
-            if diffX > diffY && diffX > diffZ then
-                struct (-int roundedY - int roundedZ, int roundedZ)
-            elif diffY > diffZ then
-                struct (int roundedX, -int roundedX - int roundedY)
-            else
-                let finalR = -int roundedX - int roundedY
-                struct (int roundedX, finalR)
-
-        let inline convertHexToWorld q r z hexHeight =
-            let x = HEX_RADIUS * (SQRT3 * double q + SQRT3 / 2.0 * double r)
-            let y = HEX_RADIUS * (1.5 * double r)
-            let zPos = (double z + 0.5) * hexHeight
-            Vector3(x, y, zPos) 
-
-        let inline convertWorldToRawGridCoords (pos: Vector3) =
-            let struct (fracQ, fracR) = convertWorldToFractionalAxial pos.X pos.Y
-            let struct (initialGuessQ, initialGuessR) = cubeRound fracQ (-fracQ - fracR) fracR
-
-            let guessHexCenter = convertHexToWorld initialGuessQ initialGuessR 0 0.0
-
-            let relativePos = pos - guessHexCenter
-
-            let struct (fracQ_stable, fracR_stable) = convertWorldToFractionalAxial relativePos.X relativePos.Y
-
-            let struct (offsetQ, offsetR) = cubeRound fracQ_stable (-fracQ_stable - fracR_stable) fracR_stable
-
-            let finalQ = initialGuessQ + offsetQ
-            let finalR = initialGuessR + offsetR
-            let finalZIndex = int (Math.Floor(pos.Z / HEX_HEIGHT))
-
-            struct(finalQ, finalR, finalZIndex)
-
-        let convertWorldToSubPrismCoords (pos: Vector3)=
-            let struct (finalQ, finalR, finalZIndex) = convertWorldToRawGridCoords pos
-
-            let rawHexCenter = convertHexToWorld finalQ finalR 0 0.0
-
-            let mutable relativePos = pos - rawHexCenter
-            WorldLimits.relative &relativePos
-
-            let angle = Math.Atan2(relativePos.Y, relativePos.X)
-            let normalizedAngle = if angle < 0.0 then angle + 2.0 * PI else angle
-            let sector = int (Math.Floor(normalizedAngle / (PI / 3.0))) % 6
-            let verticalLayer = if (pos.Z - (double finalZIndex + 0.5) * HEX_HEIGHT) < 0.0 then 0 else 1
-            let finalSubIndex = verticalLayer * 6 + sector
-
-            SubPrismCoords.Normalize(finalQ, finalR, finalZIndex, finalSubIndex)
-
-        let private _vertexes =
-            [|
-                Vector3(HEX_RADIUS * cos (double 0 * PI / 3.0), HEX_RADIUS * sin (double 0 * PI / 3.0), 0.0)
-                Vector3(HEX_RADIUS * cos (double 1 * PI / 3.0), HEX_RADIUS * sin (double 1 * PI / 3.0), 0.0)
-                Vector3(HEX_RADIUS * cos (double 2 * PI / 3.0), HEX_RADIUS * sin (double 2 * PI / 3.0), 0.0)
-                Vector3(HEX_RADIUS * cos (double 3 * PI / 3.0), HEX_RADIUS * sin (double 3 * PI / 3.0), 0.0)
-                Vector3(HEX_RADIUS * cos (double 4 * PI / 3.0), HEX_RADIUS * sin (double 4 * PI / 3.0), 0.0)
-                Vector3(HEX_RADIUS * cos (double 5 * PI / 3.0), HEX_RADIUS * sin (double 5 * PI / 3.0), 0.0)
-            |]
-
-        let getTriangularPrismCenter (coords: SubPrismCoords)=
-            let hexCenter = convertHexToWorld coords.Q coords.R 0 0.0
-            let sector = coords.SubIndex % 6
-
-            let v1 = hexCenter
-            let v2 = hexCenter + _vertexes[sector]
-            let v3 = hexCenter + _vertexes[(sector + 1) % 6]
-
-            let baseCenter = (v1 + v2 + v3) / 3.0
-            let zPos = HEX_HEIGHT * (double coords.Z + (if coords.SubIndex < 6 then 0.25 else 0.75))
-
-            Vector3(baseCenter.X, baseCenter.Y, zPos)
-
-        let inline fillGridFromCorners (corners: Span<Vector3>) (filterBuffer: HashSet<uint64>) =
-            let mutable rawMinQ, rawMaxQ = Int32.MaxValue, Int32.MinValue
-            let mutable rawMinR, rawMaxR = Int32.MaxValue, Int32.MinValue
-            let mutable rawMinZ, rawMaxZ = Int32.MaxValue, Int32.MinValue
-
-            for corner in corners do
-                let struct(rawQ, rawR, rawZ) = convertWorldToRawGridCoords corner
-                rawMinQ <- min rawMinQ rawQ
-                rawMaxQ <- max rawMaxQ rawQ
-                rawMinR <- min rawMinR rawR
-                rawMaxR <- max rawMaxR rawR
-                rawMinZ <- min rawMinZ rawZ
-                rawMaxZ <- max rawMaxZ rawZ
-
-            for q = rawMinQ to rawMaxQ do
-                for r = rawMinR to rawMaxR do
-                    for z = rawMinZ to rawMaxZ do
-                        for sub_idx = 0 to 11 do
-                            let finalCoords = SubPrismCoords.Normalize(q, r, z, sub_idx)
-                            let key = finalCoords |> SubPrismKey.pack
-                            filterBuffer.Add key |> ignore
-
-        let inline fillForShift
-            (shiftBuffer: Span<Vector3>)
-            (initialWorldCorners : Span<Vector3>)
-            (shift: Vector3)
-            (filterBuffer: HashSet<uint64>) =
-            
-            shiftBuffer[0] <- initialWorldCorners[0] + shift
-            shiftBuffer[1] <- initialWorldCorners[1] + shift
-            shiftBuffer[2] <- initialWorldCorners[2] + shift
-            shiftBuffer[3] <- initialWorldCorners[3] + shift
-            shiftBuffer[4] <- initialWorldCorners[4] + shift
-            shiftBuffer[5] <- initialWorldCorners[5] + shift
-            shiftBuffer[6] <- initialWorldCorners[6] + shift
-            shiftBuffer[7] <- initialWorldCorners[7] + shift
-            fillGridFromCorners shiftBuffer filterBuffer
-
-        let fillOverlappingSubPrismsAABB
-            (bodyPosition: Vector3)
-            (bodyDimensions: Vector3)
-            (bodyOrientation: Matrix3x3)
-            (filterBuffer: HashSet<uint64>)
-            (buffer: PooledList<uint64>)
-            =
-            
-            filterBuffer.Clear()
-            buffer.Clear()
-
-            let h = bodyDimensions / 2.0
-            
-            let initialWorldCorners : Span<Vector3> = Stack.alloc 8
-            initialWorldCorners[0] <- bodyPosition + bodyOrientation * Vector3(-h.X, -h.Y, -h.Z)
-            initialWorldCorners[1] <- bodyPosition + bodyOrientation * Vector3(h.X, -h.Y, -h.Z)
-            initialWorldCorners[2] <- bodyPosition + bodyOrientation * Vector3(h.X, h.Y, -h.Z)
-            initialWorldCorners[3] <- bodyPosition + bodyOrientation * Vector3(-h.X, h.Y, -h.Z)
-            initialWorldCorners[4] <- bodyPosition + bodyOrientation * Vector3(-h.X, -h.Y, h.Z)
-            initialWorldCorners[5] <- bodyPosition + bodyOrientation * Vector3(h.X, -h.Y, h.Z)
-            initialWorldCorners[6] <- bodyPosition + bodyOrientation * Vector3(h.X, h.Y, h.Z)
-            initialWorldCorners[7] <- bodyPosition + bodyOrientation * Vector3(-h.X, h.Y, h.Z)
-
-            let mutable minAABB = initialWorldCorners[0]
-            let mutable maxAABB = initialWorldCorners[0]
-            for i = 1 to 7 do
-                let worldCorner = initialWorldCorners[i]
-                minAABB.X <- min minAABB.X worldCorner.X
-                minAABB.Y <- min minAABB.Y worldCorner.Y
-                minAABB.Z <- min minAABB.Z worldCorner.Z
-                maxAABB.X <- max maxAABB.X worldCorner.X
-                maxAABB.Y <- max maxAABB.Y worldCorner.Y
-                maxAABB.Z <- max maxAABB.Z worldCorner.Z
-
-            fillGridFromCorners initialWorldCorners filterBuffer
-
-            let margin = (max bodyDimensions.X bodyDimensions.Y) * 1.5
-            let nearMinX = minAABB.X < margin
-            let nearMaxX = maxAABB.X > (WorldLimits.X - margin)
-            let nearMinY = minAABB.Y < margin
-            let nearMaxY = maxAABB.Y > (WorldLimits.Y - margin)
-
-            let shiftBuffer : Span<Vector3> = Stack.alloc 8
-            
-            if nearMinX then fillForShift shiftBuffer initialWorldCorners (Vector3(WorldLimits.X, 0.0, 0.0)) filterBuffer
-            if nearMaxX then fillForShift shiftBuffer initialWorldCorners (Vector3(-WorldLimits.X, 0.0, 0.0)) filterBuffer
-            if nearMinY then fillForShift shiftBuffer initialWorldCorners (Vector3(0.0, WorldLimits.Y, 0.0)) filterBuffer
-            if nearMaxY then fillForShift shiftBuffer initialWorldCorners (Vector3(0.0, -WorldLimits.Y, 0.0)) filterBuffer
-
-            if nearMinX && nearMinY then fillForShift shiftBuffer initialWorldCorners (Vector3(WorldLimits.X, WorldLimits.Y, 0.0)) filterBuffer
-            if nearMaxX && nearMinY then fillForShift shiftBuffer initialWorldCorners (Vector3(-WorldLimits.X, WorldLimits.Y, 0.0)) filterBuffer
-            if nearMinX && nearMaxY then fillForShift shiftBuffer initialWorldCorners (Vector3(WorldLimits.X, -WorldLimits.Y, 0.0)) filterBuffer
-            if nearMaxX && nearMaxY then fillForShift shiftBuffer initialWorldCorners (Vector3(-WorldLimits.X, -WorldLimits.Y, 0.0)) filterBuffer
-
-            buffer.AddRange(filterBuffer)
     
-    [<RequireQualifiedAccess>]
-    module Geometry =
-
-        let private _precomputedPrismShapes =
-            let precomputePrismShape (sector: int) =
-                let inline calcRelativeHexVertex (index: int) =
-                    let angle = double index * PI / 3.0
-                    Vector3(HEX_RADIUS * cos angle, HEX_RADIUS * sin angle, 0.0)
-
-                let nextSector = (sector + 1) % 6
-
-                let v1_rel = Vector3.Zero
-                let v2_rel = calcRelativeHexVertex sector
-                let v3_rel = calcRelativeHexVertex nextSector
-
-                let xAxis = ((v2_rel + v3_rel) / 2.0 - v1_rel).Normalize()
-                let zAxis = Vector3.Up
-                let yAxis = Vector3.Cross(zAxis, xAxis).Normalize()
-                let orientation = Matrix3x3(xAxis, yAxis, zAxis)
-
-                let baseCenter_rel = (v1_rel + v2_rel + v3_rel) / 3.0
-                let invOrientation = orientation.Transpose()
-                let localV1 = invOrientation * (v1_rel - baseCenter_rel)
-                let localV2 = invOrientation * (v2_rel - baseCenter_rel)
-                let localV3 = invOrientation * (v3_rel - baseCenter_rel)
-
-                let minLocalX = min localV1.X (min localV2.X localV3.X)
-                let maxLocalX = max localV1.X (max localV2.X localV3.X)
-                let minLocalY = min localV1.Y (min localV2.Y localV3.Y)
-                let maxLocalY = max localV1.Y (max localV2.Y localV3.Y)
-                
-                let hx = (maxLocalX - minLocalX) / 2.0
-                let hy = (maxLocalY - minLocalY) / 2.0
-                let hz = HEX_HEIGHT / 4.0
-
-                let dimensions = Vector3(hx, hy, hz) * 2.0
-
-                struct (orientation, dimensions)
-
-            [| for i in 0..5 -> precomputePrismShape i |]
-            
-        type Repo =
-            private
-                {
-                    _logger : ILogger
-                    _prisms : Dictionary<uint64, Material>
-                    mutable _idGenerator: int
-                }
-            
-            member this.Prisms : IReadOnlyDictionary<_, _> = this._prisms
-        
-        let createRepo() =
-            {
-                _logger = Log.ForContext<Repo>()
-                _prisms = Dictionary()
-                _idGenerator = -1
-            }
-            
-        let removePrism key r = r._prisms.Remove key
-        
-        let createPrismSpace (coords: SubPrismCoords) =
-            let absolutePrismPos = coords |> Grid.getTriangularPrismCenter
-            let struct (orientation, dimensions) = _precomputedPrismShapes[coords.SubIndex % 6]
-            struct (absolutePrismPos, dimensions, orientation)
-
-        let addPrism(coords: SubPrismCoords)  (material: Material) r =
-            let coords = coords |> SubPrismKey.pack
-            let mutable isFound = false
-            let newPrism = &CollectionsMarshal.GetValueRefOrAddDefault (r._prisms, coords, &isFound)
-            newPrism <- material
-
-        let isSolid coords r = r._prisms.ContainsKey coords
-
-        let inline hasSupportBeneath (point: Vector3) r =
-            let checkPos = point - Vector3(0.0, 0.0, 0.01)
-            if checkPos.Z < EPSILON then true
-            else
-                let supportCoords = checkPos |> Grid.convertWorldToSubPrismCoords |> SubPrismKey.pack
-                r |> isSolid supportCoords
-
-        let getPrismSpace coords  = coords |> createPrismSpace
-        
-        let getPrismSpaceByKey key  = key |> SubPrismKey.unpack |> getPrismSpace
-        
-        let updatePhysics(fallingPrisms: PooledList<Body.T>) (prismsToRemove: PooledList<uint64>) r=
-            for kvp in r._prisms do
-                if kvp.Value = Material.GravityEnabled then
-                    let coordsKey = kvp.Key
-                    let coords = coordsKey |> SubPrismKey.unpack
-                    let pos = coords |> Grid.getTriangularPrismCenter 
-                    let checkPos = pos - Vector3(0.0, 0.0, HEX_HEIGHT / 2.0 + 0.01)
-
-                    let supportCoords = checkPos |> Grid.convertWorldToSubPrismCoords |> SubPrismKey.pack
-
-                    if not <| (r |> isSolid supportCoords) then
-                        let struct (position, dimension, orientation) = coords |> createPrismSpace
-                        let body =
-                            Body.T(
-                                r._idGenerator,
-                                Body.BodyType.SolidPrism,
-                                10000.0, 
-                                dimension,
-                                orientation,
-                                position,
-                                Vector3.Zero,
-                                coords,
-                                0.5)
-
-                        r._idGenerator <- r._idGenerator - 1
-
-                        fallingPrisms.Add body
-
-                        prismsToRemove.Add coordsKey
-
     
     [<RequireQualifiedAccess>]
     module Collision =
@@ -749,12 +453,13 @@ module Engine =
                 let centerB = (minValB + maxValB) * 0.5
                 let extentB = (maxValB - minValB) * 0.5
 
-                let mutable dist = centerA - centerB
+                let mutable delta = centerA - centerB
                 let halfWorldSize = worldSize * 0.5
-                if dist > halfWorldSize then dist <- dist - worldSize
-                elif dist < -halfWorldSize then dist <- dist + worldSize
-                
-                abs(dist) <= (extentA + extentB)
+
+                if delta > halfWorldSize then delta <- delta - worldSize
+                elif delta < -halfWorldSize then delta <- delta + worldSize
+
+                abs(delta) <= (extentA + extentB)
 
             let zOverlaps = maxA.Z >= minB.Z && minA.Z <= maxB.Z
 
@@ -792,7 +497,7 @@ module Engine =
                 | 12 -> Vector3.Cross(o1.R2, o2.R0)
                 | 13 -> Vector3.Cross(o1.R2, o2.R1)
                 | 14 -> Vector3.Cross(o1.R2, o2.R2)
-                | _ -> Vector3.Zero // WTF!?
+                | _ -> Vector3.Zero
             
             let h1 = d1 / 2.0
             let h2 = d2 / 2.0
@@ -881,6 +586,346 @@ module Engine =
             let struct(result, _) = checkCollisionSATWithCachedAxis p1 d1 o1 p2 d2 o2 -1
             result
     
+    [<RequireQualifiedAccess>]
+    module Grid =
+        let private _precomputedPrismShapes =
+            let precomputePrismShape (sector: int) =
+                let inline calcRelativeHexVertex (index: int) =
+                    let angle = double index * PI / 3.0
+                    Vector3(HEX_RADIUS * cos angle, HEX_RADIUS * sin angle, 0.0)
+
+                let nextSector = (sector + 1) % 6
+
+                let v1_rel = Vector3.Zero
+                let v2_rel = calcRelativeHexVertex sector
+                let v3_rel = calcRelativeHexVertex nextSector
+
+                let xAxis = ((v2_rel + v3_rel) / 2.0 - v1_rel).Normalize()
+                let zAxis = Vector3.Up
+                let yAxis = Vector3.Cross(zAxis, xAxis).Normalize()
+                let orientation = Matrix3x3(xAxis, yAxis, zAxis)
+
+                let baseCenter_rel = (v1_rel + v2_rel + v3_rel) / 3.0
+                let invOrientation = orientation.Transpose()
+                let localV1 = invOrientation * (v1_rel - baseCenter_rel)
+                let localV2 = invOrientation * (v2_rel - baseCenter_rel)
+                let localV3 = invOrientation * (v3_rel - baseCenter_rel)
+
+                let minLocalX = min localV1.X (min localV2.X localV3.X)
+                let maxLocalX = max localV1.X (max localV2.X localV3.X)
+                let minLocalY = min localV1.Y (min localV2.Y localV3.Y)
+                let maxLocalY = max localV1.Y (max localV2.Y localV3.Y)
+                
+                let hx = (maxLocalX - minLocalX) / 2.0
+                let hy = (maxLocalY - minLocalY) / 2.0
+                let hz = HEX_HEIGHT / 4.0
+
+                let dimensions = Vector3(hx, hy, hz) * 2.0
+
+                struct (orientation, dimensions)
+
+            [| for i in 0..5 -> precomputePrismShape i |]
+        
+        let private _vertexes =
+            [|
+                Vector3(HEX_RADIUS * cos (double 0 * PI / 3.0), HEX_RADIUS * sin (double 0 * PI / 3.0), 0.0)
+                Vector3(HEX_RADIUS * cos (double 1 * PI / 3.0), HEX_RADIUS * sin (double 1 * PI / 3.0), 0.0)
+                Vector3(HEX_RADIUS * cos (double 2 * PI / 3.0), HEX_RADIUS * sin (double 2 * PI / 3.0), 0.0)
+                Vector3(HEX_RADIUS * cos (double 3 * PI / 3.0), HEX_RADIUS * sin (double 3 * PI / 3.0), 0.0)
+                Vector3(HEX_RADIUS * cos (double 4 * PI / 3.0), HEX_RADIUS * sin (double 4 * PI / 3.0), 0.0)
+                Vector3(HEX_RADIUS * cos (double 5 * PI / 3.0), HEX_RADIUS * sin (double 5 * PI / 3.0), 0.0)
+            |]
+    
+        let inline convertWorldToFractionalAxial worldX worldY =
+            let r_approx = worldY / (HEX_RADIUS * 1.5)
+            let r = r_approx
+            let q_approx = worldX / (HEX_RADIUS * SQRT3) - 0.5 * (double (int r_approx &&& 1))
+            let q = q_approx
+
+            struct (q, r)
+
+        let inline cubeRound (fracX: double) (fracY: double) (fracZ: double) =
+            let roundedX = Math.Round fracX
+            let roundedY = Math.Round fracY
+            let roundedZ = Math.Round fracZ
+
+            let diffX = abs (roundedX - fracX)
+            let diffY = abs (roundedY - fracY)
+            let diffZ = abs (roundedZ - fracZ)
+
+            // Rounding correction: the axis with the largest change due to rounding is
+            // recalculated from the other two to preserve the x+y+z=0 invariant
+            if diffX > diffY && diffX > diffZ then
+                struct (-int roundedY - int roundedZ, int roundedZ)
+            elif diffY > diffZ then
+                struct (int roundedX, -int roundedX - int roundedY)
+            else
+                let finalR = -int roundedX - int roundedY
+                struct (int roundedX, finalR)
+
+        let inline convertHexToWorld q r z hexHeight =
+            let x = HEX_RADIUS * SQRT3 * (double q + 0.5 * double (r &&& 1))
+            let y = HEX_RADIUS * 1.5 * double r
+            let zPos = (double z + 0.5) * hexHeight
+            Vector3(x, y, zPos)
+
+        let inline convertWorldToRawGridCoords (pos: Vector3) =
+            let struct (fracQ, fracR) = convertWorldToFractionalAxial pos.X pos.Y
+            let struct (initialGuessQ, initialGuessR) = cubeRound fracQ (-fracQ - fracR) fracR
+
+            let guessHexCenter = convertHexToWorld initialGuessQ initialGuessR 0 0.0
+
+            let mutable relativePos = pos - guessHexCenter
+
+            let struct (fracQ_stable, fracR_stable) = convertWorldToFractionalAxial relativePos.X relativePos.Y
+            let struct (offsetQ, offsetR) = cubeRound fracQ_stable (-fracQ_stable - fracR_stable) fracR_stable
+
+            let finalQ = initialGuessQ + offsetQ    
+            let finalR = initialGuessR + offsetR
+            let finalZIndex = Math.Floor(pos.Z / HEX_HEIGHT) |> int
+
+            struct(finalQ, finalR, finalZIndex)
+
+        let convertWorldToSubPrismCoords (pos: Vector3)=
+            let struct (finalQ, finalR, finalZIndex) = convertWorldToRawGridCoords pos
+
+            let rawHexCenter = convertHexToWorld finalQ finalR 0 0.0
+
+            let mutable relativePos = pos - rawHexCenter
+            WorldLimits.relative &relativePos
+
+            let angle = Math.Atan2(relativePos.Y, relativePos.X)
+            let normalizedAngle = if angle < 0.0 then angle + 2.0 * PI else angle
+            let sector = int (Math.Floor(normalizedAngle / (PI / 3.0))) % 6
+            let verticalLayer = if (pos.Z - (double finalZIndex + 0.5) * HEX_HEIGHT) < 0.0 then 0 else 1
+            let finalSubIndex = verticalLayer * 6 + sector
+
+            SubPrismCoords.Normalize(finalQ, finalR, finalZIndex, finalSubIndex)
+
+        let getTriangularPrismCenter (coords: SubPrismCoords)=
+            let hexCenter = convertHexToWorld coords.Q coords.R 0 0.0
+            let sector = coords.SubIndex % 6
+
+            let v1 = hexCenter
+            let v2 = hexCenter + _vertexes[sector]
+            let v3 = hexCenter + _vertexes[(sector + 1) % 6]
+
+            let baseCenter = (v1 + v2 + v3) / 3.0
+            let zPos = HEX_HEIGHT * (double coords.Z + (if coords.SubIndex < 6 then 0.25 else 0.75))
+
+            Vector3(baseCenter.X, baseCenter.Y, zPos)
+
+        let createPrismSpace (coords: SubPrismCoords) =
+            let absolutePrismPos = coords |> getTriangularPrismCenter
+            let struct (orientation, dimensions) = _precomputedPrismShapes[coords.SubIndex % 6]
+            struct (absolutePrismPos, dimensions, orientation)
+
+        let inline getPrismSpace coords  = coords |> createPrismSpace
+        
+        let inline getPrismSpaceByKey key  = key |> SubPrismKey.unpack |> getPrismSpace
+        
+        let inline private getTriangularPrismAABB (coords: SubPrismCoords) =
+            let struct(prismPos, prismDims, prismOrient) = getPrismSpace coords
+            Collision.getAABB prismPos prismDims prismOrient
+
+        let inline private fillGridFromCorners
+            (corners: Span<Vector3>)
+            (minAABB: Vector3)
+            (maxAABB: Vector3)
+            (p: Vector3)
+            (d: Vector3)
+            (o: Matrix3x3) 
+            (filter: HashSet<uint64>) =
+            let mutable rawMinQ, rawMaxQ = Int32.MaxValue, Int32.MinValue
+            let mutable rawMinR, rawMaxR = Int32.MaxValue, Int32.MinValue
+            let mutable rawMinZ, rawMaxZ = Int32.MaxValue, Int32.MinValue
+            
+            for i = 0 to corners.Length - 1 do
+                let struct(rawQ, rawR, rawZ) = corners[i] |> convertWorldToRawGridCoords 
+                rawMinQ <- min rawMinQ rawQ
+                rawMaxQ <- max rawMaxQ rawQ
+                rawMinR <- min rawMinR rawR
+                rawMaxR <- max rawMaxR rawR
+                rawMinZ <- min rawMinZ rawZ
+                rawMaxZ <- max rawMaxZ rawZ
+
+            for q = rawMinQ to rawMaxQ do
+                for r = rawMinR to rawMaxR do
+                    for z = rawMinZ to rawMaxZ do
+                        let hexBottomZ = double z * HEX_HEIGHT
+                        let hexTopZ = hexBottomZ + HEX_HEIGHT
+                        if maxAABB.Z >= hexBottomZ && minAABB.Z <= hexTopZ then
+                            let hexCenterXY = convertHexToWorld q r 0 0.0
+                            let minHexAABB = Vector3(hexCenterXY.X - HEX_RADIUS, hexCenterXY.Y - HEX_RADIUS, hexBottomZ)
+                            let maxHexAABB = Vector3(hexCenterXY.X + HEX_RADIUS, hexCenterXY.Y + HEX_RADIUS, hexTopZ)
+
+                            if Collision.checkCollisionAABB minAABB maxAABB minHexAABB maxHexAABB then
+                                let overlapsBottomHalf = maxAABB.Z >= hexBottomZ && minAABB.Z < (hexBottomZ + 0.5 * HEX_HEIGHT)
+                                let overlapsTopHalf = maxAABB.Z >= (hexBottomZ + 0.5 * HEX_HEIGHT) && minAABB.Z < hexTopZ
+
+                                let inline checkAndAddSubPrisms (startIndex: int) (endIndex: int) =
+                                    for sub_idx = startIndex to endIndex do
+                                        let subPrismCoords = SubPrismCoords.Normalize(q, r, z, sub_idx)
+                                        let struct(prismPos, prismDims, prismOrient) = subPrismCoords |> getPrismSpace
+
+                                        let result =
+                                            Collision.checkCollisionSAT
+                                                p
+                                                d
+                                                o
+                                                prismPos
+                                                prismDims
+                                                prismOrient
+                                                    
+                                        if result.AreColliding then
+                                            let key = subPrismCoords |> SubPrismKey.pack
+                                            filter.Add key |> ignore
+                                
+                                if overlapsBottomHalf then
+                                    checkAndAddSubPrisms 0 5
+                                if overlapsTopHalf then
+                                    checkAndAddSubPrisms 6 11
+
+        let inline private fillForShift
+            (shift: Vector3)
+            (p: Vector3)
+            (d: Vector3)
+            (o: Matrix3x3)
+            (worldCorners: Span<Vector3>)
+            (shiftBuffer: Span<Vector3>)
+            (filter: HashSet<uint64>) =
+            
+            shiftBuffer[0] <- worldCorners[0] + shift
+            shiftBuffer[1] <- worldCorners[1] + shift
+            shiftBuffer[2] <- worldCorners[2] + shift
+            shiftBuffer[3] <- worldCorners[3] + shift
+            shiftBuffer[4] <- worldCorners[4] + shift
+            shiftBuffer[5] <- worldCorners[5] + shift
+            shiftBuffer[6] <- worldCorners[6] + shift
+            shiftBuffer[7] <- worldCorners[7] + shift
+                
+            let shiftedPos = p + shift
+            let struct(shiftedMin, shiftedMax) = Collision.getAABB shiftedPos d o
+
+            fillGridFromCorners shiftBuffer shiftedMin shiftedMax shiftedPos d o filter
+            
+        let fillOverlappingSubPrismsAABB
+            (p: Vector3)
+            (d: Vector3)
+            (o: Matrix3x3)
+            (filter: HashSet<uint64>)
+            (buffer: PooledList<uint64>) =
+            
+            filter.Clear()
+            buffer.Clear()
+
+            let h = d / 2.0
+            let worldCorners : Span<Vector3> = Stack.alloc 8
+            worldCorners[0] <- p + o * Vector3(-h.X, -h.Y, -h.Z)
+            worldCorners[1] <- p + o * Vector3(h.X, -h.Y, -h.Z)
+            worldCorners[2] <- p + o * Vector3(h.X, h.Y, -h.Z)
+            worldCorners[3] <- p + o * Vector3(-h.X, h.Y, -h.Z)
+            worldCorners[4] <- p + o * Vector3(-h.X, -h.Y, h.Z)
+            worldCorners[5] <- p + o * Vector3(h.X, -h.Y, h.Z)
+            worldCorners[6] <- p + o * Vector3(h.X, h.Y, h.Z)
+            worldCorners[7] <- p + o * Vector3(-h.X, h.Y, h.Z)
+                
+            let struct(minAABB, maxAABB) = Collision.getAABB p d o
+            
+            fillGridFromCorners
+                worldCorners
+                minAABB
+                maxAABB
+                p
+                d
+                o
+                filter
+
+            let margin = (max d.X d.Y) * 1.5
+            let nearMinX = minAABB.X < margin
+            let nearMaxX = maxAABB.X > (WorldLimits.X - margin)
+            let nearMinY = minAABB.Y < margin
+            let nearMaxY = maxAABB.Y > (WorldLimits.Y - margin)
+
+            if nearMinX || nearMaxX || nearMinY || nearMaxY then
+                let shiftBuffer : Span<Vector3> = Stack.alloc 8
+                if nearMinX then fillForShift (Vector3(WorldLimits.X, 0.0, 0.0)) p d o worldCorners shiftBuffer filter
+                if nearMaxX then fillForShift (Vector3(-WorldLimits.X, 0.0, 0.0)) p d o worldCorners shiftBuffer filter
+                if nearMinY then fillForShift (Vector3(0.0, WorldLimits.Y, 0.0)) p d o worldCorners shiftBuffer filter
+                if nearMaxY then fillForShift (Vector3(0.0, -WorldLimits.Y, 0.0)) p d o worldCorners shiftBuffer filter
+                if nearMinX && nearMinY then fillForShift (Vector3(WorldLimits.X, WorldLimits.Y, 0.0)) p d o worldCorners shiftBuffer filter
+                if nearMaxX && nearMinY then fillForShift (Vector3(-WorldLimits.X, WorldLimits.Y, 0.0)) p d o worldCorners shiftBuffer filter
+                if nearMinX && nearMaxY then fillForShift (Vector3(WorldLimits.X, -WorldLimits.Y, 0.0)) p d o worldCorners shiftBuffer filter
+                if nearMaxX && nearMaxY then fillForShift (Vector3(-WorldLimits.X, -WorldLimits.Y, 0.0)) p d o worldCorners shiftBuffer filter
+
+            buffer.AddRange filter
+    
+    [<RequireQualifiedAccess>]
+    module Geometry =
+        type Repo =
+            private
+                {
+                    _logger : ILogger
+                    _prisms : Dictionary<uint64, Material>
+                    mutable _idGenerator: int
+                }
+            
+            member this.Prisms : IReadOnlyDictionary<_, _> = this._prisms
+        
+        let createRepo() =
+            {
+                _logger = Log.ForContext<Repo>()
+                _prisms = Dictionary()
+                _idGenerator = -1
+            }
+            
+        let removePrism key r = r._prisms.Remove key
+        
+        let addPrism(coords: SubPrismCoords)  (material: Material) r =
+            let coords = coords |> SubPrismKey.pack
+            let mutable isFound = false
+            let newPrism = &CollectionsMarshal.GetValueRefOrAddDefault (r._prisms, coords, &isFound)
+            newPrism <- material
+
+        let isSolid coords r = r._prisms.ContainsKey coords
+
+        let inline hasSupportBeneath (point: Vector3) r =
+            let checkPos = point - Vector3(0.0, 0.0, 0.01)
+            if checkPos.Z < EPSILON then true
+            else
+                let supportCoords = checkPos |> Grid.convertWorldToSubPrismCoords |> SubPrismKey.pack
+                r |> isSolid supportCoords
+
+        let updatePhysics(fallingPrisms: PooledList<Body.T>) (prismsToRemove: PooledList<uint64>) r=
+            for kvp in r._prisms do
+                if kvp.Value = Material.GravityEnabled then
+                    let coordsKey = kvp.Key
+                    let coords = coordsKey |> SubPrismKey.unpack
+                    let pos = coords |> Grid.getTriangularPrismCenter 
+                    let checkPos = pos - Vector3(0.0, 0.0, HEX_HEIGHT / 2.0 + 0.01)
+
+                    let supportCoords = checkPos |> Grid.convertWorldToSubPrismCoords |> SubPrismKey.pack
+
+                    if not <| (r |> isSolid supportCoords) then
+                        let struct (position, dimension, orientation) = coords |> Grid.createPrismSpace
+                        let body =
+                            Body.T(
+                                r._idGenerator,
+                                Body.BodyType.SolidPrism,
+                                10000.0, 
+                                dimension,
+                                orientation,
+                                position,
+                                Vector3.Zero,
+                                coords,
+                                0.5)
+
+                        r._idGenerator <- r._idGenerator - 1
+
+                        fallingPrisms.Add body
+
+                        prismsToRemove.Add coordsKey
+
     [<RequireQualifiedAccess>]
     module Flora =
         
@@ -1231,29 +1276,59 @@ module Engine =
 
     [<RequireQualifiedAccess>]
     module SpatialHash =
+        
+        [<Struct; IsReadOnly>]
+        type BodyCacheEntry =
+            val Position: Vector3
+            val Dimensions: Vector3
+            val Orientation: Matrix3x3
+            val OccupiedCells: PooledList<uint64>
+            new(body: inref<Body.T>, cells) = 
+                { 
+                    Position = body.Position; 
+                    Dimensions = body.Dimensions;
+                    Orientation = body.Orientation;
+                    OccupiedCells = cells 
+                }
+        
+        let private areTransformsEqual (b1: inref<Body.T>) (b2: inref<BodyCacheEntry>) =
+            let inline areVectorsClose (v1: Vector3) (v2: Vector3) =
+                abs(v1.X - v2.X) < EPSILON
+                && abs(v1.Y - v2.Y) < EPSILON
+                && abs(v1.Z - v2.Z) < EPSILON
+
+            let inline areMatricesClose (m1: Matrix3x3) (m2: Matrix3x3) =
+                areVectorsClose m1.R0 m2.R0
+                && areVectorsClose m1.R1 m2.R1
+                && areVectorsClose m1.R2 m2.R2
+
+            areVectorsClose b1.Position b2.Position
+            && areVectorsClose b1.Dimensions b2.Dimensions
+            && areMatricesClose b1.Orientation b2.Orientation
+        
         type Repo =
             private
                 {
                     _logger : ILogger
                     _hash : Dictionary<uint64, PooledList<int>>
-                    _bodyVolumeCache : Dictionary<int, PooledList<uint64>>
+                    _bodyStateCache : Dictionary<int, BodyCacheEntry>
                 }
             member this.Dispose() =
                 this._hash.Values |> Seq.iter Dispose.action
-                this._bodyVolumeCache.Values |> Seq.iter Dispose.action
+                this._bodyStateCache.Values |> Seq.iter(fun entry -> entry.OccupiedCells |> Dispose.action)
             interface IDisposable with
                 member this.Dispose() = this.Dispose()
                 
         let createRepo() =
             {
                 _logger = Log.ForContext<Repo>()
-                _hash = Dictionary<uint64, PooledList<int>>()
-                _bodyVolumeCache = Dictionary<int, PooledList<uint64>>()
+                _hash = Dictionary<_, _>()
+                _bodyStateCache = Dictionary<_, _>()
             }
         
         let getOccupiedCells bodyId r : ReadOnlySpan<uint64> =
-            match r._bodyVolumeCache.TryGetValue bodyId with
-            | true, occupiedCells -> occupiedCells.Span
+            match r._bodyStateCache.TryGetValue bodyId with
+            | true, entry -> entry.OccupiedCells.Span
             | false, _ -> ReadOnlySpan<uint64>.Empty
 
         let inline private addBodyToCell bodyId cellKey r =
@@ -1276,10 +1351,10 @@ module Engine =
 
         let clear r =
             r._hash.Values |> Seq.iter Dispose.action
-            r._bodyVolumeCache.Values |> Seq.iter Dispose.action
+            r._bodyStateCache.Values |> Seq.iter(fun entry -> entry.OccupiedCells |> Dispose.action)
            
             r._hash.Clear()
-            r._bodyVolumeCache.Clear()
+            r._bodyStateCache.Clear()
 
         let query cellKey r =
             match r._hash.TryGetValue cellKey with
@@ -1287,7 +1362,7 @@ module Engine =
             | false, _ -> Span<int>.Empty
 
         let add(body: inref<Body.T>) buffers r =
-            if r._bodyVolumeCache.ContainsKey body.Id then
+            if r._bodyStateCache.ContainsKey body.Id then
                 r._logger.Warning("Body {BodyId} was already added into cache", body.Id)
             else
                 let occupiedCells = new PooledList<uint64>()
@@ -1300,46 +1375,47 @@ module Engine =
                 
                 for cellKey in occupiedCells.Span do
                     r |> addBodyToCell body.Id cellKey
-                
-                r._bodyVolumeCache.Add(body.Id, occupiedCells)
 
-        let removeBody bodyId r =
-            match r._bodyVolumeCache.TryGetValue bodyId with
-            | true, occupiedCells ->
-                for cellKey in occupiedCells.Span do
+                let newEntry = BodyCacheEntry(&body, occupiedCells)
+                r._bodyStateCache.Add(body.Id, newEntry)
+
+        let remove bodyId r =
+            match r._bodyStateCache.TryGetValue bodyId with
+            | true, entry ->
+                for cellKey in entry.OccupiedCells.Span do
                     r |> removeBodyFromCell bodyId cellKey
                 
-                occupiedCells |> Dispose.action
-                r._bodyVolumeCache.Remove bodyId |> ignore
+                entry.OccupiedCells |> Dispose.action
+                r._bodyStateCache.Remove bodyId |> ignore
             | false, _ -> ()
 
-        let update(body: inref<Body.T>) buffers r=
-            let newOccupiedCells = new PooledList<uint64>()
-            Grid.fillOverlappingSubPrismsAABB
-                body.Position
-                body.Dimensions
-                body.Orientation
-                buffers.UniquePrismsFilterBuffer
-                newOccupiedCells
+        let update (body: inref<Body.T>) buffers r=
+            let cachedEntry = &CollectionsMarshal.GetValueRefOrNullRef(r._bodyStateCache, body.Id)
+            match Unsafe.IsNullRef &cachedEntry with
+            | true -> add &body buffers r
+            | false ->
+                if not <| areTransformsEqual &body &cachedEntry then
+                    let newOccupiedCells = new PooledList<uint64>()
+                    Grid.fillOverlappingSubPrismsAABB
+                        body.Position
+                        body.Dimensions
+                        body.Orientation
+                        buffers.UniquePrismsFilterBuffer
+                        newOccupiedCells
+                    
+                    let oldOccupiedCells = cachedEntry.OccupiedCells
+                    use newCellsSet = new PooledSet<uint64>(newOccupiedCells.Span)
 
-            match r._bodyVolumeCache.TryGetValue body.Id with
-            | false, _ ->
-                for cellKey in newOccupiedCells.Span do
-                    r |> addBodyToCell body.Id cellKey
-                r._bodyVolumeCache.Add(body.Id, newOccupiedCells)
+                    for oldCell in oldOccupiedCells.Span do
+                        if not <| newCellsSet.Remove oldCell then
+                            r |> removeBodyFromCell body.Id oldCell
 
-            | true, oldOccupiedCells ->
-                use newCellsSet = new PooledSet<uint64>(newOccupiedCells.Span)
+                    for newCell in newCellsSet do
+                        r |> addBodyToCell body.Id newCell
 
-                for oldCell in oldOccupiedCells.Span do
-                    if not <| newCellsSet.Remove oldCell then
-                        r |> removeBodyFromCell body.Id oldCell
-
-                for newCell in newCellsSet do
-                    r |> addBodyToCell body.Id newCell
-
-                oldOccupiedCells |> Dispose.action
-                r._bodyVolumeCache[body.Id] <- newOccupiedCells
+                    oldOccupiedCells |> Dispose.action
+                    
+                    cachedEntry <- BodyCacheEntry(&body, newOccupiedCells)
     
     [<RequireQualifiedAccess>]    
     module SnapGrid =
@@ -1437,7 +1513,7 @@ module Engine =
                     while isFree && i < occupiedCells.Length do
                         let cellKey = &occupiedCells[i]
                         if geometryRepo |> Geometry.isSolid cellKey then
-                            let struct (staticPos, staticDims, staticOrient) = cellKey |> Geometry.getPrismSpaceByKey 
+                            let struct (staticPos, staticDims, staticOrient) = cellKey |> Grid.getPrismSpaceByKey 
                             let result =
                                 Collision.checkCollisionSAT
                                     candidatePosition
@@ -1674,6 +1750,7 @@ module Engine =
                     IsSlow = false
                     IsGrounded = false
                     HadContactsRemovedThisStep = false
+                    MaxPenetrationThisStep = 0.0
                 }
             val Id: int
             val Bodies: PooledSet<int>
@@ -1684,7 +1761,12 @@ module Engine =
             val mutable IsSlow : bool
             val mutable IsGrounded : bool
             val mutable HadContactsRemovedThisStep : bool
+            val mutable MaxPenetrationThisStep : double
             
+            member inline this.UpdateMaxPenetration depth =
+                if depth > this.MaxPenetrationThisStep then
+                    this.MaxPenetrationThisStep <- depth
+                    
             member inline this.EnsureContactsExist() =
                 if isNull this._contactsHolder then
                     this._contactsHolder <- { Contacts = ExpiringContacts.Create() }
@@ -1721,6 +1803,7 @@ module Engine =
                     sourceIsland._contactsHolder.Contacts.TransferTo &this._contactsHolder.Contacts
                     
             member this.NextStep() =
+                this.MaxPenetrationThisStep <- 0.0
                 if this.IsSlow && not <| isNull this._contactsHolder then
                     let struct(newContacts, contactsWereRemoved) = this._contactsHolder.Contacts.NextStep()
                     this._contactsHolder.Contacts <- newContacts
@@ -1907,7 +1990,7 @@ module Engine =
                     while not hasFoundSupport && i < occupiedCells.Length do
                         let cellKey = &occupiedCells[i]
                         if geometryRepo |> Geometry.isSolid cellKey then
-                            let struct (staticPos, staticDims, staticOrient) = cellKey |> Geometry.getPrismSpaceByKey
+                            let struct (staticPos, staticDims, staticOrient) = cellKey |> Grid.getPrismSpaceByKey
                             let result =
                                 Collision.checkCollisionSAT
                                     body.Position
@@ -2009,7 +2092,7 @@ module Engine =
         let requestWakeIsland (island: byref<T>) r =
             island.FramesResting <- 0
             if not <| island.IsAwake && r._islandsToWake.Add island.Id then
-                r._logger.Information("Request wake island: {IslandId}", island.Id)
+                r._logger.Debug("Request wake island: {IslandId}", island.Id)
             
         let islandMerge sourceId targetId r =
             if sourceId <> targetId then
@@ -2019,6 +2102,7 @@ module Engine =
                     targetIsland.CantSleepFrames <- max sourceIsland.CantSleepFrames targetIsland.CantSleepFrames
                     targetIsland.FramesResting <- 0
                     targetIsland.IsGrounded <- sourceIsland.IsGrounded || targetIsland.IsGrounded
+                    targetIsland.UpdateMaxPenetration sourceIsland.MaxPenetrationThisStep
                     
                     use bodiesToMove = new PooledList<int>(sourceIsland.Bodies)
                     for bodyId in bodiesToMove.Span do
@@ -2035,7 +2119,7 @@ module Engine =
                 
         let requestSleep (island: byref<T>) r =
             if island.IsAwake && r._islandsToSleep.Add island.Id then
-                r._logger.Information("Request sleep island: {IslandId}", island.Id)
+                r._logger.Debug("Request sleep island: {IslandId}", island.Id)
             
         let requestMerge id1 id2 r =
             if id1 <> id2 then
@@ -2060,7 +2144,7 @@ module Engine =
                     // Merge is deferred if a split has already been requested for one of the root islands
                     // in the same frame. This gives split requests priority if they arrive first
                     if r._islandsMarkedForSplit.Contains root1 || r._islandsMarkedForSplit.Contains root2 then
-                        r._logger.Information("Merge deferred for ({Id1}, {Id2}) because one root is marked for split", id1, id2)
+                        r._logger.Debug("Merge deferred for ({Id1}, {Id2}) because one root is marked for split", id1, id2)
                     else
                         let mutable island1 = &getIslandRef root1 r
                         let mutable island2 = &getIslandRef root2 r
@@ -2076,7 +2160,7 @@ module Engine =
                                     
                             let pair = struct (sourceRoot, targetRoot)
                             if r._islandsToMergePairs.Add pair then
-                                r._logger.Information(
+                                r._logger.Debug(
                                     "Redirected Merge: original ({Id1}, {Id2}) -> final ({SourceRoot}, {TargetRoot})",
                                     id1,
                                     id2,
@@ -2092,10 +2176,18 @@ module Engine =
                     
         let requestSplit islandId r =
             if r._islandsInvolvedInMerge.Contains islandId then
-                r._logger.Information("Split request for island {IslandId} ignored due to a pending merge", islandId)
+                r._logger.Debug("Split request for island {IslandId} ignored due to a pending merge", islandId)
             elif r._islandsMarkedForSplit.Add islandId then
-                r._logger.Information("Request split island: {IslandId}", islandId)
+                r._logger.Debug("Request split island: {IslandId}", islandId)
         
+        let private removeIslands r =
+            let mergedIdsToRemove = CollectionsMarshal.AsSpan r._removeIslandsBuffer
+            for removedId in mergedIdsToRemove do
+                r._allIslands.Remove removedId |> ignore
+                r._activeIslandIds.Remove removedId |> ignore
+                r._sleepingIslandIds.Remove removedId |> ignore
+            r._removeIslandsBuffer.Clear()
+            
         let processIslandChanges geometryRepo buffers r =
             
             r._staticSupportCache.Clear()
@@ -2119,7 +2211,7 @@ module Engine =
                     // island.ContactTTL.Clear()
                     
                     for bodyId in island.Bodies do
-                        r._sleepingHash |> SpatialHash.removeBody bodyId
+                        r._sleepingHash |> SpatialHash.remove bodyId
                         let body = &Body.getRef bodyId r._bodyRepo
                         if not <| Unsafe.IsNullRef &body then
                             SpatialHash.add &body buffers r._activeHash
@@ -2134,6 +2226,8 @@ module Engine =
                 r |> islandMerge sourceId targetId
             r._islandsToMergePairs.Clear()
 
+            r |> removeIslands
+    
             for islandIdToSplit in r._islandsMarkedForSplit do
                 let mutable originalIsland = &getIslandRef islandIdToSplit r
                 if not <| Unsafe.IsNullRef &originalIsland then
@@ -2143,8 +2237,10 @@ module Engine =
                         components |> Seq.iter Dispose.action
                     else
 
-                        r._logger.Information("Splitting {IslandId} into {ComponentCount} components",  originalIsland.Id, components.Count)
+                        r._logger.Debug("Splitting {IslandId} into {ComponentCount} components",  originalIsland.Id, components.Count)
 
+                        let originalMaxPenetration = originalIsland.MaxPenetrationThisStep
+                        
                         let mutable largestComponentIndex = -1
                         let mutable maxBodyCount = -1
                         for i = 0 to components.Count - 1 do
@@ -2159,8 +2255,9 @@ module Engine =
                                 let mutable newFragmentIsland = r |> newIsland
                                 r._allIslands.Add(newFragmentIsland.Id, newFragmentIsland)
                                 r._activeIslandIds.Add newFragmentIsland.Id |> ignore
+                                newFragmentIsland.MaxPenetrationThisStep <- originalMaxPenetration
                                 
-                                r._logger.Information("New island fragment {IslandId} with {ComponentCount} was created", newFragmentIsland.Id, fragmentComponent.Count)
+                                r._logger.Debug("New island fragment {IslandId} with {ComponentCount} was created", newFragmentIsland.Id, fragmentComponent.Count)
 
                                 for bodyId in fragmentComponent.Span do
                                     newFragmentIsland.Bodies.Add bodyId |> ignore
@@ -2224,8 +2321,9 @@ module Engine =
                         
                         if isStillEligibleForSleep then
                             island.IsAwake <- false
+                            island.MaxPenetrationThisStep <- 0.0
                             for bodyId in island.Bodies do
-                                r._activeHash |> SpatialHash.removeBody bodyId
+                                r._activeHash |> SpatialHash.remove bodyId
                                 let body = &Body.getRef bodyId r._bodyRepo
                                 if not <| Unsafe.IsNullRef &body then
                                     body.Velocity <- Vector3.Zero
@@ -2241,13 +2339,7 @@ module Engine =
                 if island.Bodies.Count = 0 then
                     r._removeIslandsBuffer.Add island.Id
                     
-            let removedIds = CollectionsMarshal.AsSpan r._removeIslandsBuffer
-            for removedId in removedIds do
-                r._allIslands.Remove removedId |> ignore
-                r._activeIslandIds.Remove removedId |> ignore
-                r._sleepingIslandIds.Remove removedId |> ignore
-                
-            r._removeIslandsBuffer.Clear()
+            r |> removeIslands
 
     [<RequireQualifiedAccess>]
     module Liquid =
@@ -2349,6 +2441,17 @@ module Engine =
         interface IDisposable with
             member this.Dispose() = this.Dispose()
     let createEngine dt =
+        
+        let logger =
+            LoggerConfiguration()
+                .WriteTo.Async(fun c -> c.Console() |> ignore)
+                .MinimumLevel.Information()
+                .CreateLogger();
+
+        Log.CloseAndFlush()
+
+        Log.Logger <- logger
+
         let geometryRepo = Geometry.createRepo()
         let bodyRepo = Body.createRepo()
 
@@ -2398,6 +2501,21 @@ module Engine =
                             isFound <- true
             isFound
 
+        let private checkWorldPosForSupport
+            (p: Vector3)
+            geometryRepo
+            bodyRepo
+            (body: inref<Body.T>)
+            activeHash
+            sleepingHash =
+
+            let checkPos = Vector3(p.X, p.Y, p.Z - PENETRATION_SLOP)
+            let key = checkPos |> Grid.convertWorldToSubPrismCoords |> SubPrismKey.pack
+
+            geometryRepo |> Geometry.isSolid key
+            || checkPartnersInHash p bodyRepo key &body activeHash
+            || checkPartnersInHash p bodyRepo key &body sleepingHash
+
         let private checkSinglePoint
             geometryRepo
             bodyRepo
@@ -2405,18 +2523,19 @@ module Engine =
             activeHash
             sleepingHash
             (point: Vector3) =
+        
             if point.Z <= PENETRATION_SLOP then
                 true
             else
-                let cellKey = point |> Grid.convertWorldToSubPrismCoords |> SubPrismKey.pack
-                if geometryRepo |> Geometry.isSolid cellKey then
-                    true
-                elif checkPartnersInHash point bodyRepo cellKey &body activeHash then
-                    true
-                elif checkPartnersInHash point bodyRepo cellKey &body sleepingHash then
+                if checkWorldPosForSupport point geometryRepo bodyRepo &body activeHash sleepingHash then
                     true
                 else
-                   false
+                    let radius = HEX_RADIUS * 0.1
+                    if checkWorldPosForSupport (point + Vector3(radius, 0.0, 0.0)) geometryRepo bodyRepo &body activeHash sleepingHash then true
+                    elif checkWorldPosForSupport (point - Vector3(radius, 0.0, 0.0)) geometryRepo bodyRepo &body activeHash sleepingHash then true
+                    elif checkWorldPosForSupport (point + Vector3(0.0, radius, 0.0)) geometryRepo bodyRepo &body activeHash sleepingHash then true
+                    elif checkWorldPosForSupport (point - Vector3(0.0, -radius, 0.0)) geometryRepo bodyRepo &body activeHash sleepingHash then true
+                    else false
         
         let isPointSupported
             geometryRepo
@@ -2834,6 +2953,21 @@ module Engine =
                         WorldLimits.wrapPosition &idealNewPosition
                         body.Position <- idealNewPosition
 
+                        let h = body.Dimensions / 2.0
+                        let mutable lowestPointZ = Double.MaxValue
+                        for i = 0 to 7 do
+                            let signX = if (i &&& 1) = 0 then -1.0 else 1.0
+                            let signY = if (i &&& 2) = 0 then -1.0 else 1.0
+                            let signZ = if (i &&& 4) = 0 then -1.0 else 1.0
+                            let localCorner = Vector3(h.X * signX, h.Y * signY, h.Z * signZ)
+                            let worldCorner = body.Position + body.Orientation * localCorner
+                            lowestPointZ <- min lowestPointZ worldCorner.Z
+                        
+                        let pivotZ = body.FallPivotPoint.Z
+                        if lowestPointZ < pivotZ then
+                            let correctionZ = pivotZ - lowestPointZ
+                            body.Position.Z <- body.Position.Z + correctionZ
+                            
                         let mutable delta = body.Position - previousPosition
                         WorldLimits.relative &delta
                        
@@ -2841,7 +2975,7 @@ module Engine =
                             body.Velocity <- delta / sub_dt
                         else
                             body.Velocity <- Vector3.Zero
-
+                            
                         let mutable hasStoppedOnStatic = false
                         let mutable penetrationVector = Vector3.Zero
 
@@ -2856,7 +2990,7 @@ module Engine =
                         while not hasStoppedOnStatic && cellIdx < buffers.UniquePrismsBuffer.Count do
                             let cellKey = buffers.UniquePrismsBuffer[cellIdx]
                             if geometryRepo |> Geometry.isSolid cellKey then
-                                let struct (staticPos, staticDims, staticOrient) = cellKey |> Geometry.getPrismSpaceByKey 
+                                let struct (staticPos, staticDims, staticOrient) = cellKey |> Grid.getPrismSpaceByKey 
                                 let result =
                                     Collision.checkCollisionSAT
                                         body.Position
@@ -2867,8 +3001,10 @@ module Engine =
                                         staticOrient
                                         
                                 if result.AreColliding then
-                                    hasStoppedOnStatic <- true
-                                    penetrationVector <- result.PenetrationVector
+                                    let struct(_, penetrationDepth) = result.Normalize()
+                                    if penetrationDepth > PENETRATION_SLOP then
+                                        hasStoppedOnStatic <- true
+                                        penetrationVector <- result.PenetrationVector
                             cellIdx <- cellIdx + 1
 
                         for cellKey in buffers.UniquePrismsBuffer.Span do
@@ -2881,23 +3017,27 @@ module Engine =
                         let shouldFinalize = hasStoppedOnStatic || animationFinished
 
                         if shouldFinalize then
-                            let oldDims = body.Dimensions
-                            let finalOrientation = Matrix3x3.Identity
-
-                            let localRotationAxis = body.FallInitialOrientation.Transpose() * body.FallRotationAxis
-                            let finalDimensions =
-                                if abs(localRotationAxis.X) > 0.9 then
-                                    if oldDims.Z > oldDims.Y then
-                                        Vector3(oldDims.X, oldDims.Z, oldDims.Y)
-                                    else
-                                        oldDims
-                                elif abs(localRotationAxis.Y) > 0.9 then
-                                    if oldDims.Z > oldDims.X then
-                                        Vector3(oldDims.Z, oldDims.Y, oldDims.X)
-                                    else
-                                        oldDims
+                            
+                            let fallDirection = Vector3.Cross(body.FallRotationAxis, Vector3.Up)
+                            let finalFallDirection =
+                                if fallDirection.MagnitudeSq() < EPSILON_X2 then
+                                    Vector3.UnitX
                                 else
-                                    oldDims
+                                    fallDirection.Normalize()
+                                    
+                            let newX_axis = finalFallDirection
+                            let newZ_axis = Vector3.Up
+                            let newY_axis = Vector3.Cross(newZ_axis, newX_axis).Normalize()
+                            let finalNewX_axis = Vector3.Cross(newY_axis, newZ_axis)
+                            let finalOrientation = Matrix3x3(finalNewX_axis, newY_axis, newZ_axis)
+
+                            let oldDims = body.Dimensions
+                            let finalDimensions =
+                                let localRotationAxis = body.FallInitialOrientation.Transpose() * body.FallRotationAxis
+                                if abs(localRotationAxis.X) > abs(localRotationAxis.Y) then
+                                    Vector3(oldDims.X, oldDims.Z, oldDims.Y)
+                                else
+                                    Vector3(oldDims.Z, oldDims.Y, oldDims.X)
 
                             let mutable finalPosition = Vector3.Zero
 
@@ -2938,10 +3078,10 @@ module Engine =
 
                             body.IsFallingOver <- false
                             body.FallRotationProgress <- 1.0
-                            body.Velocity <- Vector3.Zero
                             body.Orientation <- finalOrientation
                             body.Dimensions <- finalDimensions
                             body.Position <- finalPosition
+                            body.Velocity <- Vector3.Zero
                             WorldLimits.wrapPosition &body.Position
 
         let inline private checkBodyProximity(minA: Vector3) (maxA: Vector3) (minB: Vector3) (maxB: Vector3) =
@@ -3006,6 +3146,7 @@ module Engine =
                     
                     let island = &Island.getIslandRefForBody b1.Id islandRepo
                     if not <| Unsafe.IsNullRef &island then
+                        island.UpdateMaxPenetration penetrationDepth
                         island.IsGrounded <- true
                         
                 // Проверка столкновения с потолком
@@ -3056,6 +3197,7 @@ module Engine =
                     
                 if result.AreColliding then
                     let struct(finalNormal, penetrationDepth) = result.Normalize()
+
                     let stableResult = CollisionResult(finalNormal * penetrationDepth)
                     let totalImpulseScalar =
                         resolveDynamicCollision
@@ -3078,11 +3220,13 @@ module Engine =
                     
                     let contactKey = ContactKey.key b1.Id b2.Id
                     island1.AddOrUpdateContact(contactKey, CONTACT_TTL, newCachedAxis)
+                    island1.UpdateMaxPenetration penetrationDepth
                     
                     if island1.Id <> island2.Id then
                         islandRepo |> Island.requestMerge island1.Id island2.Id
                         island2.AddOrUpdateContact(contactKey, CONTACT_TTL, newCachedAxis)                              
-
+                        island2.UpdateMaxPenetration penetrationDepth
+                        
                     b1.IsSnappedToGrid <- false
                     b2.IsSnappedToGrid <- false
                 elif checkBodyProximity minA maxA minB maxB then
@@ -3151,13 +3295,15 @@ module Engine =
 
                     let contactKey = ContactKey.key b1.Id b2.Id
                     island1.AddOrUpdateContact(contactKey, CONTACT_TTL, newCachedAxis)
+                    island1.UpdateMaxPenetration penetrationDepth
                     island2.AddOrUpdateContact(contactKey, CONTACT_TTL, newCachedAxis)
-
+                    island2.UpdateMaxPenetration penetrationDepth
+                    
                     b1.IsSnappedToGrid <- false
                     b2.IsSnappedToGrid <- false
         
         let private resolveStaticGeometryCollision (b1: byref<Body.T>) cellKey islandRepo dt =
-            let struct (pos, dims, orient) = cellKey |> Geometry.getPrismSpaceByKey 
+            let struct (pos, dims, orient) = cellKey |> Grid.getPrismSpaceByKey 
             let result =
                 Collision.checkCollisionSAT
                     b1.Position
@@ -3176,12 +3322,14 @@ module Engine =
                 resolveStaticFriction &b1 finalNormal totalImpulseScalar b1.InvMass dt
                 let island = &Island.getIslandRefForBody b1.Id islandRepo
                 if not <| Unsafe.IsNullRef &island then
+                    island.UpdateMaxPenetration penetrationDepth
                     island.IsGrounded <- true
                     
         let private resolveFloraCollision
             (b1: byref<Body.T>)
             treeId
             floraRepo
+            (island: byref<Island.T>)
             buffers
             (rnd: Random)
             dt =
@@ -3227,6 +3375,7 @@ module Engine =
                         buffers.FloraToRemoveIds.Add treeData.Id
                     else
                         let struct(finalNormal, penetrationDepth) = result.Normalize()
+                        island.UpdateMaxPenetration penetrationDepth
                         let stableResult = CollisionResult(finalNormal * penetrationDepth)
                         let totalImpulseScalar = resolveStaticCollision &b1 stableResult
                         resolveStaticFriction &b1 finalNormal totalImpulseScalar b1.InvMass dt
@@ -3328,6 +3477,7 @@ module Engine =
                                         &b1
                                         treeId
                                         floraRepo
+                                        &island
                                         buffers
                                         rnd
                                         sub_dt
@@ -3372,7 +3522,9 @@ module Engine =
                     island.IsSlow <- isStillSlow
                     
                     if island.IsSlow then
-                        if island.IsGrounded then
+                        if island.MaxPenetrationThisStep > MAX_PENETRATION then
+                            island.FramesResting <- 0
+                        elif island.IsGrounded then
                             island.FramesResting <- island.FramesResting + 1
                             
                             if island.FramesResting >= FRAMES_TO_SLEEP && island.CantSleepFrames <= 0 then
@@ -3397,7 +3549,7 @@ module Engine =
                                                 fallDirection.Z <- 0.0
 
                                                 if fallDirection.MagnitudeSq() > EPSILON then
-                                                    let pushStrength = 1.0
+                                                    let pushStrength = 1.6
                                                     let horizontalPush = fallDirection.Normalize()
                                                     let liftFactor = 0.4
                                                     let verticalLift = Vector3.Up * liftFactor
@@ -3455,8 +3607,8 @@ module Engine =
             for id in buffers.BodiesToRemoveIds.Span do
                 bodyRepo |> Body.remove id |> ignore
                 islandRepo |> Island.removeBody id
-                activeHash |> SpatialHash.removeBody id
-                sleepingHash |> SpatialHash.removeBody id
+                activeHash |> SpatialHash.remove id
+                sleepingHash |> SpatialHash.remove id
 
             for body in buffers.BodiesToAdd.Span do
                 Body.tryAdd &body bodyRepo |> ignore
@@ -3477,9 +3629,9 @@ module Engine =
                     let body = &Body.getRef bodyId engine._bodyRepo
                     if not <| Unsafe.IsNullRef &body then
                         SpatialHash.update &body engine._buffers engine._activeHash
-                        if (not <| body.IsSnappedToGrid) && (not <| body.IsFallingOver) && body.IsGravityEnabled then
+                        if not <| body.IsFallingOver && not <| body.IsSnappedToGrid && body.IsGravityEnabled then
                             body.Velocity <- body.Velocity + GRAVITY * engine._dt
-                            
+                                
             for body in engine._buffers.BodiesToAdd.Span do
                  let foundBody = &Body.getRef body.Id engine._bodyRepo
                  if not <| Unsafe.IsNullRef &foundBody then
@@ -3497,13 +3649,13 @@ module Engine =
                     let island = &Island.getIslandRef islandId engine._islandRepo
                     for bodyId in island.Bodies do
                         let body = &Body.getRef bodyId engine._bodyRepo
-                        if not <| Unsafe.IsNullRef &body && not body.IsFallingOver then
-                            body.Position <- body.Position + body.Velocity * sub_dt
-                            WorldLimits.wrapPosition &body.Position
-   
+                        if not <| Unsafe.IsNullRef &body && not <| body.IsFallingOver then                          
                             let vSq = body.Velocity.MagnitudeSq()
                             if vSq > MAX_SPEED_SQ then
                                 body.Velocity <- body.Velocity.Normalize() * MAX_SPEED
+                                
+                            body.Position <- body.Position + body.Velocity * sub_dt
+                            WorldLimits.wrapPosition &body.Position
                 
             engine._floraRepo |> Flora.updatePhysics engine._buffers.UnrootedFlora  engine._buffers.FloraToRemoveIds
             engine._geometryRepo |> Geometry.updatePhysics engine._buffers.FallingPrisms engine._buffers.PrismsToRemoveCoords
