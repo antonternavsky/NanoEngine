@@ -24,7 +24,7 @@ module Engine =
     let [<Literal>] PI = Math.PI
     let SQRT3 = Math.Sqrt 3.0
     let [<Literal>] MIN_DIMENSION_THRESHOLD = 0.001
-    let [<Literal>] MAX_DIMENSION = 40.0
+    let [<Literal>] MAX_DIMENSION = 10.0
     let [<Literal>] GRID_WIDTH_Q = 65536
     let [<Literal>] GRID_DEPTH_R = 65536
     let [<Literal>] GRID_HEIGHT_Z = 248
@@ -284,8 +284,8 @@ module Engine =
     module WorldLimits =
         let X = HEX_RADIUS * Math.Sqrt(3.0) * double GRID_WIDTH_Q
         let Y = HEX_RADIUS * 1.5 * double GRID_DEPTH_R
-        let _halfX = X / 2.0
-        let _halfY = Y / 2.0
+        let HalfX = X / 2.0
+        let HalfY = Y / 2.0
             
         let inline private wrap value range =
             if value >= 0.0 && value < range then
@@ -303,13 +303,13 @@ module Engine =
             p.Y <- wrapY p.Y
         
         let inline relativeX value =
-            if value > _halfX then value - X
-            elif value < -_halfX then value + X
+            if value > HalfX then value - X
+            elif value < -HalfX then value + X
             else value
             
         let inline relativeY value =
-            if value > _halfY then value - Y
-            elif value < -_halfY then value + Y
+            if value > HalfY then value - Y
+            elif value < -HalfY then value + Y
             else value
             
         let inline relative (delta: byref<Vector3>) =
@@ -1226,6 +1226,30 @@ module Engine =
             updateCollection r._trees
             updateCollection r._bushes
 
+    type EndpointType =
+        | Start = 0uy
+        | End = 1uy
+
+    [<Struct; CustomEquality; CustomComparison; IsReadOnly>]
+    type IslandEndpoint =
+        new(islandId, value : double, endpointType) =
+            {
+                IslandId = islandId
+                Value = value
+                Type = endpointType
+            }
+            
+        val IslandId: int
+        val Value: double
+        val Type: EndpointType
+        interface IEquatable<IslandEndpoint> with
+            member this.Equals other =
+                this.IslandId = other.IslandId
+                && this.Type = other.Type
+                && this.Value.Equals other.Value
+        interface IComparable<IslandEndpoint> with
+            member this.CompareTo other = this.Value.CompareTo other.Value
+        
     [<Struct>]
     type Buffers =
         {
@@ -1236,8 +1260,8 @@ module Engine =
             SnapPointsBuffer: PooledList<Vector3>
             CollisionCheckedBodyPairs : HashSet<int64>
             CollisionIslandPairs: HashSet<int64>
-            CollisionActiveIslandIds: PooledList<int>
-            CollisionSleepingIslandIds: PooledList<int>
+            CollisionIslandEndpoints : PooledList<IslandEndpoint>
+            CollisionActiveSweepList : PooledList<int>
             CollisionDestroyedFlora: HashSet<int>
             CollisionProcessedStatic: HashSet<uint64>
             CollisionProcessedFlora: HashSet<int>
@@ -1252,10 +1276,7 @@ module Engine =
             this.UnrootedFlora |> Dispose.action
             this.FallingPrisms |> Dispose.action
             this.SnapPointsBuffer |> Dispose.action
-            
-            this.CollisionActiveIslandIds |> Dispose.action
-            this.CollisionSleepingIslandIds |> Dispose.action
-            
+
             this.BodiesToAdd |> Dispose.action
             this.BodiesToRemoveIds |> Dispose.action
             this.FloraToRemoveIds |> Dispose.action
@@ -1272,8 +1293,8 @@ module Engine =
             
             this.CollisionCheckedBodyPairs.Clear()
             this.CollisionIslandPairs.Clear()
-            this.CollisionActiveIslandIds.Clear()
-            this.CollisionSleepingIslandIds.Clear()
+            this.CollisionIslandEndpoints.Clear()
+            this.CollisionActiveSweepList.Clear()
             this.CollisionDestroyedFlora.Clear()
             this.CollisionProcessedStatic.Clear()
             this.CollisionProcessedFlora.Clear()
@@ -1292,8 +1313,8 @@ module Engine =
                 SnapPointsBuffer = new PooledList<_>()
 
                 CollisionCheckedBodyPairs = HashSet()
-                CollisionActiveIslandIds = new PooledList<_>()
-                CollisionSleepingIslandIds = new PooledList<_>()
+                CollisionIslandEndpoints = new PooledList<_>()
+                CollisionActiveSweepList = new PooledList<_>()
                 CollisionIslandPairs = HashSet()
                 CollisionDestroyedFlora = HashSet()
                 CollisionProcessedStatic = HashSet()
@@ -3444,8 +3465,71 @@ module Engine =
                         let stableResult = CollisionResult(finalNormal * penetrationDepth)
                         let totalImpulseScalar = resolveStaticCollision &b1 stableResult
                         resolveStaticFriction &b1 finalNormal totalImpulseScalar b1.InvMass dt
+        
+        let private addIslandEndpoints (endpoints: PooledList<IslandEndpoint>) (island: inref<Island.T>) =
+            let minX = island.MinAABB.X
+            let maxX = island.MaxAABB.X
+            let minY = island.MinAABB.Y
+            let maxY = island.MaxAABB.Y
+            let worldX = WorldLimits.X
+            let islandId = island.Id
+            let margin = MAX_DIMENSION / 2.0
+            let yBucketHeight = MAX_DIMENSION * 2.0
+            
+            let startYBucketIndex = Math.Floor(minY / yBucketHeight) |> int
+            let endYBucketIndex = Math.Floor(maxY / yBucketHeight) |> int
 
-        let private detectCollisionsAndUpdateIslands sub_dt engine =
+            for yBucket = startYBucketIndex to endYBucketIndex do
+                let xOffset = (yBucket |> double) * worldX
+
+                let isNearXEdge = minX < margin || maxX > (worldX - margin)
+
+                if isNearXEdge then
+                    endpoints.Add(IslandEndpoint(islandId, -MAX_DIMENSION + xOffset, EndpointType.Start))
+                    endpoints.Add(IslandEndpoint(islandId, MAX_DIMENSION + xOffset, EndpointType.End))
+                else
+                    endpoints.Add(IslandEndpoint(islandId, minX + xOffset, EndpointType.Start))
+                    endpoints.Add(IslandEndpoint(islandId, maxX + xOffset, EndpointType.End))
+
+        let private detectBroadPhaseIslandPairs engine=
+            let islandRepo = engine._islandRepo
+            let buffers = engine._buffers
+
+            let collidingIslandPairs = buffers.CollisionIslandPairs
+            let endpoints = buffers.CollisionIslandEndpoints
+            let activeSweepList = buffers.CollisionActiveSweepList
+
+            collidingIslandPairs.Clear()
+            endpoints.Clear()
+            activeSweepList.Clear()
+
+            for islandId in islandRepo |> Island.getActiveIslandIds do
+                addIslandEndpoints endpoints (&Island.getIslandRef islandId islandRepo)
+            for islandId in islandRepo |> Island.getSleepingIslandIds do
+                addIslandEndpoints endpoints (&Island.getIslandRef islandId islandRepo)
+            
+            endpoints.Span.Sort()
+
+            for endpoint in endpoints.Span do
+                if endpoint.Type = EndpointType.Start then
+                    let island1 = &Island.getIslandRef endpoint.IslandId islandRepo
+                    for otherIslandId in activeSweepList.Span do
+                        let island2 = &Island.getIslandRef otherIslandId islandRepo
+
+                        if Collision.checkCollisionAABB island1.MinAABB island1.MaxAABB island2.MinAABB island2.MaxAABB then
+                            let key = ContactKey.key endpoint.IslandId otherIslandId
+                            collidingIslandPairs.Add key |> ignore
+                    
+                    activeSweepList.Add endpoint.IslandId
+                else
+                    Utils.removeBySwapBack endpoint.IslandId activeSweepList |> ignore
+
+            collidingIslandPairs
+            
+        let private resolveNarrowPhaseCollisions
+            collidingIslandPairs
+            sub_dt
+            engine =
             
             let buffers = engine._buffers
             let islandRepo = engine._islandRepo
@@ -3456,26 +3540,15 @@ module Engine =
             let floraRepo = engine._floraRepo
             let rnd = engine._random
 
-            let activeIslands = buffers.CollisionActiveIslandIds
             let checkedBodyPairs = buffers.CollisionCheckedBodyPairs   
             let processedStatic = buffers.CollisionProcessedStatic
             let processedFlora = buffers.CollisionProcessedFlora
-            let collidingIslandPairs = buffers.CollisionIslandPairs
-            let sleepingIslands = buffers.CollisionSleepingIslandIds
-            
-            activeIslands.Clear()
-            sleepingIslands.Clear()
-            checkedBodyPairs.Clear()
-            collidingIslandPairs.Clear()
-            
-            activeIslands.AddRange(islandRepo |> Island.getActiveIslandIds)
-            sleepingIslands.AddRange(islandRepo |> Island.getSleepingIslandIds)
-            
-            let activeIslandsSpan = activeIslands.Span
-            let sleepingIslandsSpan = sleepingIslands.Span
+            let destroyedFlora = buffers.CollisionDestroyedFlora
 
-            for i = 0 to activeIslandsSpan.Length - 1 do
-                let activeId1 = activeIslandsSpan[i]
+            checkedBodyPairs.Clear()
+            destroyedFlora.Clear()
+
+            for activeId1 in islandRepo |> Island.getActiveIslandIds do
                 let activeIsland1 = &Island.getIslandRef activeId1 islandRepo
                 for id1 in activeIsland1.Bodies do
                     let b1 = &Body.getRef id1 bodyRepo
@@ -3507,22 +3580,9 @@ module Engine =
                         match floraRepo |> Flora.tryGetTreesInCell cellKey with
                         | true, treeIds ->
                             for treeId in treeIds.Span do
-                                if not <| buffers.CollisionDestroyedFlora.Contains treeId && processedFlora.Add treeId then
+                                if not <| destroyedFlora.Contains treeId && processedFlora.Add treeId then
                                     resolveFloraCollision &b1 treeId floraRepo &activeIsland1 buffers rnd sub_dt
                         | _ -> ()
-                
-                // Islands intersection filter
-                for j = i + 1 to activeIslandsSpan.Length - 1 do
-                    let activeId2 = activeIslandsSpan[j]
-                    let activeIsland2 = &Island.getIslandRef activeId2 islandRepo
-                    if Collision.checkCollisionAABB activeIsland1.MinAABB activeIsland1.MaxAABB activeIsland2.MinAABB activeIsland2.MaxAABB then
-                        collidingIslandPairs.Add (ContactKey.key activeId1 activeId2) |> ignore
-                        
-                for j = 0 to sleepingIslandsSpan.Length - 1 do
-                    let sleepingId = sleepingIslandsSpan[j]
-                    let sleepingIsland = &Island.getIslandRef sleepingId islandRepo
-                    if Collision.checkCollisionAABB activeIsland1.MinAABB activeIsland1.MaxAABB sleepingIsland.MinAABB sleepingIsland.MaxAABB then
-                        collidingIslandPairs.Add (ContactKey.key activeId1 sleepingId) |> ignore
                         
             for pairKey in collidingIslandPairs do
                 let struct(id1, id2) = ContactKey.unpack pairKey
@@ -3539,7 +3599,8 @@ module Engine =
                     let b1 = &Body.getRef bodyId1 bodyRepo
                     let occupiedCells = SpatialHash.getOccupiedCells bodyId1 activeHash
                     for cellKey in occupiedCells do
-                        // We are looking for bodies from the second island (may be active or sleeping)
+                        // We are looking for bodies from the second island (maybe active or sleeping)
+                        
                         let otherHash = if otherIsland.IsAwake then activeHash else sleepingHash
                         for bodyId2 in SpatialHash.query cellKey otherHash do
                             // We make sure that the body belongs to the second island in the pair
@@ -3711,13 +3772,15 @@ module Engine =
                     Body.updateAABB &foundBody
                     SpatialHash.add &foundBody engine._buffers engine._activeHash
 
+            let collidingIslandPairs = engine |> detectBroadPhaseIslandPairs
+            
             let resolutionPasses = 8
             let sub_dt = engine._dt / double resolutionPasses
 
             for _ = 1 to resolutionPasses do
                 engine |> applyKinematicUpdates sub_dt
 
-                engine |> detectCollisionsAndUpdateIslands sub_dt
+                engine |> resolveNarrowPhaseCollisions collidingIslandPairs sub_dt
 
                 for islandId in engine._islandRepo.ActiveIslandIds do
                     let island = &Island.getIslandRef islandId engine._islandRepo
