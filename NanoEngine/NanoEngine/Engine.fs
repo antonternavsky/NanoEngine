@@ -3456,54 +3456,34 @@ module Engine =
             let floraRepo = engine._floraRepo
             let rnd = engine._random
 
-            let collidingIslandPairs = buffers.CollisionIslandPairs
-            collidingIslandPairs.Clear()
-
             let activeIslands = buffers.CollisionActiveIslandIds
-            activeIslands.Clear()
-            activeIslands.AddRange(islandRepo |> Island.getActiveIslandIds)
-
+            let checkedBodyPairs = buffers.CollisionCheckedBodyPairs   
+            let processedStatic = buffers.CollisionProcessedStatic
+            let processedFlora = buffers.CollisionProcessedFlora
+            let collidingIslandPairs = buffers.CollisionIslandPairs
             let sleepingIslands = buffers.CollisionSleepingIslandIds
+            
+            activeIslands.Clear()
             sleepingIslands.Clear()
+            checkedBodyPairs.Clear()
+            collidingIslandPairs.Clear()
+            
+            activeIslands.AddRange(islandRepo |> Island.getActiveIslandIds)
             sleepingIslands.AddRange(islandRepo |> Island.getSleepingIslandIds)
-
+            
             let activeIslandsSpan = activeIslands.Span
             let sleepingIslandsSpan = sleepingIslands.Span
-            
-            // Islands intersection filter
+
             for i = 0 to activeIslandsSpan.Length - 1 do
                 let activeId1 = activeIslandsSpan[i]
                 let activeIsland1 = &Island.getIslandRef activeId1 islandRepo
-                for j = i + 1 to activeIslandsSpan.Length - 1 do
-                    let activeId2 = activeIslandsSpan[j]
-                    let activeIsland2 = &Island.getIslandRef activeId2 islandRepo
-                    if Collision.checkCollisionAABB activeIsland1.MinAABB activeIsland1.MaxAABB activeIsland2.MinAABB activeIsland2.MaxAABB then
-                        collidingIslandPairs.Add (ContactKey.key activeId1 activeId2) |> ignore
-                for j = 0 to sleepingIslandsSpan.Length - 1 do
-                    let sleepingId = sleepingIslandsSpan[j]
-                    let sleepingIsland = &Island.getIslandRef sleepingId islandRepo
-                    if Collision.checkCollisionAABB activeIsland1.MinAABB activeIsland1.MaxAABB sleepingIsland.MinAABB sleepingIsland.MaxAABB then
-                        collidingIslandPairs.Add (ContactKey.key activeId1 sleepingId) |> ignore
-            
-            let checkedBodyPairs = buffers.CollisionCheckedBodyPairs
-            checkedBodyPairs.Clear()
-            
-            let destroyedFlora = buffers.CollisionDestroyedFlora
-            destroyedFlora.Clear()
-            
-            for islandId1 in activeIslandsSpan do
-                let island1 = &Island.getIslandRef islandId1 islandRepo
-                for id1 in island1.Bodies do
+                for id1 in activeIsland1.Bodies do
                     let b1 = &Body.getRef id1 bodyRepo
                     let invMass1 = if b1.IsFallingOver then 0.0 else b1.InvMass
-                    
                     resolveFloorAndCeilingCollisions &b1 invMass1 islandRepo sub_dt
 
                     let occupiedCells = SpatialHash.getOccupiedCells id1 activeHash
 
-                    let processedStatic = buffers.CollisionProcessedStatic
-                    let processedFlora = buffers.CollisionProcessedFlora
-                    
                     processedStatic.Clear()
                     processedFlora.Clear()
         
@@ -3511,38 +3491,66 @@ module Engine =
                         // Dynamic <-> Dynamic
                         for id2 in SpatialHash.query cellKey activeHash do
                             if id1 < id2 then
-                                let islandId2 = islandRepo |> Island.getIslandIdForBody id2
-                                let isCanCollide =
-                                    islandId1 = islandId2
-                                    || collidingIslandPairs.Contains(ContactKey.key islandId1 islandId2)
-
-                                if isCanCollide then
-                                    if checkedBodyPairs.Add(ContactKey.key id1 id2) then
+                                let activeIsland2 = &Island.getIslandRefForBody id2 islandRepo
+                                if activeIsland1.Id = activeIsland2.Id then
+                                    let contactKey = ContactKey.key id1 id2
+                                    if checkedBodyPairs.Add contactKey then
                                         let b2 = &Body.getRef id2 bodyRepo
                                         resolveDynamicDynamicCollision &b1 &b2 islandRepo sub_dt
-
-                        // Dynamic <-> Sleeping
-                        for id2 in SpatialHash.query cellKey sleepingHash do
-                            let islandId2 = islandRepo |> Island.getIslandIdForBody id2
-                            let isCanCollide = collidingIslandPairs.Contains(ContactKey.key islandId1 islandId2)
-
-                            if isCanCollide then
-                                if checkedBodyPairs.Add(ContactKey.key id1 id2) then
-                                    let b2 = &Body.getRef id2 bodyRepo
-                                    resolveDynamicSleepingCollision &b1 &b2 islandRepo sub_dt
                         
                         // Dynamic <-> Static
                         if geometryRepo |> Geometry.isSolid cellKey then
                             if processedStatic.Add cellKey then
                                 resolveStaticGeometryCollision &b1 cellKey islandRepo sub_dt
-                        
+                                
                         // Dynamic <-> Flora
                         match floraRepo |> Flora.tryGetTreesInCell cellKey with
                         | true, treeIds ->
                             for treeId in treeIds.Span do
-                                if not <| destroyedFlora.Contains treeId && processedFlora.Add treeId then
-                                    resolveFloraCollision &b1 treeId floraRepo &island1 buffers rnd sub_dt
+                                if not <| buffers.CollisionDestroyedFlora.Contains treeId && processedFlora.Add treeId then
+                                    resolveFloraCollision &b1 treeId floraRepo &activeIsland1 buffers rnd sub_dt
                         | _ -> ()
+                
+                // Islands intersection filter
+                for j = i + 1 to activeIslandsSpan.Length - 1 do
+                    let activeId2 = activeIslandsSpan[j]
+                    let activeIsland2 = &Island.getIslandRef activeId2 islandRepo
+                    if Collision.checkCollisionAABB activeIsland1.MinAABB activeIsland1.MaxAABB activeIsland2.MinAABB activeIsland2.MaxAABB then
+                        collidingIslandPairs.Add (ContactKey.key activeId1 activeId2) |> ignore
+                        
+                for j = 0 to sleepingIslandsSpan.Length - 1 do
+                    let sleepingId = sleepingIslandsSpan[j]
+                    let sleepingIsland = &Island.getIslandRef sleepingId islandRepo
+                    if Collision.checkCollisionAABB activeIsland1.MinAABB activeIsland1.MaxAABB sleepingIsland.MinAABB sleepingIsland.MaxAABB then
+                        collidingIslandPairs.Add (ContactKey.key activeId1 sleepingId) |> ignore
+                        
+            for pairKey in collidingIslandPairs do
+                let struct(id1, id2) = ContactKey.unpack pairKey
+                
+                let mutable island1 = &Island.getIslandRef id1 islandRepo
+                let mutable island2 = &Island.getIslandRef id2 islandRepo
+
+                // We determine which pair: active-active or active-sleeping
+                let activeIsland = if island1.IsAwake then &island1 else &island2
+                let otherIsland = if island1.IsAwake then &island2 else &island1
+
+                // We go through all the bodies of the active island from the pair
+                for bodyId1 in activeIsland.Bodies do
+                    let b1 = &Body.getRef bodyId1 bodyRepo
+                    let occupiedCells = SpatialHash.getOccupiedCells bodyId1 activeHash
+                    for cellKey in occupiedCells do
+                        // We are looking for bodies from the second island (may be active or sleeping)
+                        let otherHash = if otherIsland.IsAwake then activeHash else sleepingHash
+                        for bodyId2 in SpatialHash.query cellKey otherHash do
+                            // We make sure that the body belongs to the second island in the pair
+                            if otherIsland.Bodies.Contains bodyId2 then
+                                let contactKey = ContactKey.key bodyId1 bodyId2
+                                if checkedBodyPairs.Add contactKey then
+                                    let b2 = &Body.getRef bodyId2 bodyRepo
+                                    if otherIsland.IsAwake then
+                                        resolveDynamicDynamicCollision &b1 &b2 islandRepo sub_dt
+                                    else
+                                        resolveDynamicSleepingCollision &b1 &b2 islandRepo sub_dt
                         
         let private postProcessAndUpdateSleepState engine =
             let islandRepo = engine._islandRepo
