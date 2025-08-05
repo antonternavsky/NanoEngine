@@ -2583,7 +2583,7 @@ module Engine =
              bodyRepo
              activeHash
              sleepingHash =
-            if body.IsFallingOver || body.IsSnappedToGrid || body.InvMass < EPSILON then
+            if body.IsFallingOver || body.InvMass < EPSILON then
                 ValueNone
             else
                 let h = body.Dimensions / 2.0
