@@ -1214,8 +1214,9 @@ module Engine =
             CollisionProcessedSleeping: HashSet<int>
             CollisionProcessedStatic: HashSet<uint64>
             CollisionProcessedFlora: HashSet<int>
-            CollisionAABBCache: Dictionary<int, struct(Vector3 * Vector3)>
-
+            CollisionActiveAABBCache: Dictionary<int, struct(Vector3 * Vector3)>
+            CollisionSleepingAABBCache: Dictionary<int, struct(Vector3 * Vector3)>
+            
             BodiesToAdd: PooledList<Body.T>
             BodiesToRemoveIds: PooledList<int>
             FloraToRemoveIds: PooledList<int>
@@ -1246,8 +1247,9 @@ module Engine =
             this.CollisionProcessedSleeping.Clear()
             this.CollisionProcessedStatic.Clear()
             this.CollisionProcessedFlora.Clear()
-            this.CollisionAABBCache.Clear()
-
+            this.CollisionActiveAABBCache.Clear()
+            this.CollisionSleepingAABBCache.Clear()
+            
             this.BodiesToAdd.Clear()
             this.BodiesToRemoveIds.Clear()
             this.FloraToRemoveIds.Clear()
@@ -1266,8 +1268,9 @@ module Engine =
                 CollisionProcessedSleeping = HashSet()
                 CollisionProcessedStatic = HashSet()
                 CollisionProcessedFlora = HashSet()
-                CollisionAABBCache = Dictionary<_, _>()
-
+                CollisionActiveAABBCache = Dictionary<_, _>()
+                CollisionSleepingAABBCache = Dictionary<_, _>()
+                
                 BodiesToAdd = new PooledList<_>()
                 BodiesToRemoveIds = new PooledList<_>()
                 FloraToRemoveIds = new PooledList<_>()
@@ -3242,15 +3245,10 @@ module Engine =
             (b2: byref<Body.T>)
             (minA: inref<Vector3>)
             (maxA: inref<Vector3>)
+            (minB: inref<Vector3>)
+            (maxB: inref<Vector3>)
             islandRepo
             dt =
-                
-            let struct(minB, maxB) =
-                Collision.getAABB
-                    b2.Position
-                    b2.Dimensions
-                    b2.Orientation
-            
             if Collision.checkCollisionAABB minA maxA minB maxB then
                 let island1 = &Island.getIslandRefForBody b1.Id islandRepo
                 let contactKey = ContactKey.key b1.Id b2.Id
@@ -3396,22 +3394,31 @@ module Engine =
             let processedSleeping = buffers.CollisionProcessedSleeping
             let processedStatic = buffers.CollisionProcessedStatic
             let processedFlora = buffers.CollisionProcessedFlora
-            let aabbCache = buffers.CollisionAABBCache
+            let activeAABBCache = buffers.CollisionActiveAABBCache
+            let sleepingAABBCache = buffers.CollisionActiveAABBCache
             
             checkedBodyPairs.Clear()
             destroyedFlora.Clear()
             processedSleeping.Clear()
             processedStatic.Clear()
             processedFlora.Clear()
-            aabbCache.Clear()
+            activeAABBCache.Clear()
+            sleepingAABBCache.Clear()
             
             for islandId in islandRepo |> Island.getActiveIslandIds do
                 let island = &Island.getIslandRef islandId islandRepo
                 for bodyId in island.Bodies do
                     let body = &Body.getRef bodyId bodyRepo
                     let aabb = Collision.getAABB body.Position body.Dimensions body.Orientation
-                    aabbCache.Add(bodyId, aabb)
-                
+                    activeAABBCache.Add(bodyId, aabb)
+            
+            for islandId in islandRepo |> Island.getSleepingIslandIds do
+                let island = &Island.getIslandRef islandId islandRepo
+                for bodyId in island.Bodies do
+                    let body = &Body.getRef bodyId bodyRepo
+                    let aabb = Collision.getAABB body.Position body.Dimensions body.Orientation
+                    sleepingAABBCache.Add(bodyId, aabb)
+                    
             for islandId in islandRepo |> Island.getActiveIslandIds do
                 let island = &Island.getIslandRef islandId islandRepo
                 for id1 in island.Bodies do
@@ -3424,7 +3431,7 @@ module Engine =
                     processedStatic.Clear()
                     processedFlora.Clear()
 
-                    let struct(minA, maxA) = aabbCache[id1]
+                    let struct(minA, maxA) = activeAABBCache[id1]
                     
                     let occupiedCellsForBody1 = SpatialHash.getOccupiedCells id1 activeHash
                     for i = 0 to occupiedCellsForBody1.Length - 1 do
@@ -3436,7 +3443,7 @@ module Engine =
                                 let contactKey = ContactKey.key id1 id2
                                 if checkedBodyPairs.Add contactKey then
                                     let b2 = &Body.getRef id2 bodyRepo
-                                    let struct(minB, maxB) = aabbCache[id2]
+                                    let struct(minB, maxB) = activeAABBCache[id2]
                                     resolveDynamicDynamicCollision
                                         &b1
                                         &b2
@@ -3451,11 +3458,14 @@ module Engine =
                         for sleepingId in SpatialHash.query cellKey sleepingHash do
                             if processedSleeping.Add sleepingId then
                                 let b2 = &Body.getRef sleepingId bodyRepo
+                                let struct(minB, maxB) = sleepingAABBCache[sleepingId]
                                 resolveDynamicSleepingCollision
                                     &b1
                                     &b2
                                     &minA
                                     &maxA
+                                    &minB
+                                    &maxB
                                     islandRepo
                                     sub_dt
 
