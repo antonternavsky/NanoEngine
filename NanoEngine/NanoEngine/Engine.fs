@@ -3395,7 +3395,7 @@ module Engine =
             let processedStatic = buffers.CollisionProcessedStatic
             let processedFlora = buffers.CollisionProcessedFlora
             let activeAABBCache = buffers.CollisionActiveAABBCache
-            let sleepingAABBCache = buffers.CollisionActiveAABBCache
+            let sleepingAABBCache = buffers.CollisionSleepingAABBCache
             
             checkedBodyPairs.Clear()
             destroyedFlora.Clear()
