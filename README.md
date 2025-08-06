@@ -11,7 +11,8 @@ The project includes a comprehensive test suite that demonstrates complex physic
 *   **3D Rigid-Body Simulation:** Simulates position, velocity, and orientation for box-shaped objects.
 *   **Unique Grid System:** The world is partitioned using a grid of **hexagonal prisms**, which are further subdivided into 12 triangular sub-prisms. This forms the basis for the spatial hash system.
 *   **Toroidal (Wrapping) World:** The simulation space wraps around on the X and Y axes, creating a seamless, infinite world.
-*   **Three-Phase Collision Detection:**
+*   **Four-Phase Collision Detection:**
+    *   **Global Grid Phase:** A highly efficient, grid-based filtering of islands by AABB island collisions.
     *   **Broad Phase:** A highly efficient **Spatial Hash** based on the hexagonal prism grid to quickly find potentially colliding bodies.
     *   **Mid-Phase:** An Axis-Aligned Bounding Box (AABB) check is performed on potential pairs from the broad phase. This is a quick rejection step that filters out many pairs before the more expensive narrow-phase check.
     *   **Narrow Phase:** For pairs that pass the AABB check, precise collision detection is performed using the **Separating Axis Theorem (SAT)** for Oriented Bounding Boxes (OBBs).
