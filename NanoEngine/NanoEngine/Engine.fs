@@ -1897,7 +1897,18 @@ module Engine =
 
                 island.MinAABB <- centroid + minExtents
                 island.MaxAABB <- centroid + maxExtents
-            
+        
+        [<RequireQualifiedAccess>]
+        module private IslandGridPhase =
+            let inline packKey (gridX: int) (gridY: int) =
+                (int64 gridX <<< 32) ||| (int64 gridY &&& 0xFFFFFFFFL)
+
+            let inline resetGrid (grid: Dictionary<_, PooledList<_>>) =
+                grid.Values |> Seq.iter _.Clear()
+
+            let inline worldToGridCoord (pos: double) (cellSize: double) =
+                Math.Floor(pos / cellSize) |> int
+               
         type Repo =
             private
                 {
@@ -1925,9 +1936,7 @@ module Engine =
                 }
             member this.ActiveIslandIds = this._activeIslandIds
             member this.SleepingIslandIds = this._sleepingIslandIds
-            member this.IslandGrid = this._islandGrid
-            member this.GridCellSize = this._gridCellSize
-            
+
             member this.Dispose() =
                 this._allIslands.Values |> Seq.iter Dispose.action
                 this._allIslands.Clear()
@@ -1936,7 +1945,6 @@ module Engine =
                 
             interface IDisposable with
                 member this.Dispose() = this.Dispose()
-        
         let getActiveIslandIds r = r._activeIslandIds
         let getSleepingIslandIds r = r._sleepingIslandIds
         
@@ -2154,6 +2162,66 @@ module Engine =
         let getIslandIdForBody bodyId r = r._bodyToIslandMap[bodyId]
         let getIslandRef islandId r = &CollectionsMarshal.GetValueRefOrNullRef(r._allIslands, islandId)
 
+        let detectBroadPhaseIslandPairs buffers r=
+            let grid = r._islandGrid
+            let cellSize = r._gridCellSize
+            let worldX = WorldLimits.X
+            let worldY = WorldLimits.Y
+            
+            IslandGridPhase.resetGrid grid
+
+            let populate (islandId: int) =
+                let island = &getIslandRef islandId r
+                let minCorner = island.MinAABB
+                let maxCorner = island.MaxAABB
+                let minGridX = IslandGridPhase.worldToGridCoord minCorner.X cellSize
+                let maxGridX = IslandGridPhase.worldToGridCoord maxCorner.X cellSize
+                let minGridY = IslandGridPhase.worldToGridCoord minCorner.Y cellSize
+                let maxGridY = IslandGridPhase.worldToGridCoord maxCorner.Y cellSize
+
+                let gridCellsX = IslandGridPhase.worldToGridCoord worldX cellSize
+                let gridCellsY = IslandGridPhase.worldToGridCoord worldY cellSize
+
+                for gx = minGridX to maxGridX do
+                    for gy = minGridY to maxGridY do
+                        let wrappedGx = (gx % gridCellsX + gridCellsX) % gridCellsX
+                        let wrappedGy = (gy % gridCellsY + gridCellsY) % gridCellsY
+
+                        let key = IslandGridPhase.packKey wrappedGx wrappedGy
+                        
+                        let mutable isListExists = false
+                        let list = &CollectionsMarshal.GetValueRefOrAddDefault(grid, key, &isListExists)
+                        if not <| isListExists then
+                            list <- new PooledList<int>()
+                        
+                        if not <| list.Span.Contains islandId then
+                            list.Add islandId
+
+            r.ActiveIslandIds |> Seq.iter populate
+            r.SleepingIslandIds |> Seq.iter populate
+            
+            let collidingIslandPairs = buffers.CollisionIslandPairs
+            collidingIslandPairs.Clear()
+
+            for idsInCell in grid.Values do
+                let idsSpan = idsInCell.Span
+                for i = 0 to idsSpan.Length - 1 do
+                    for j = i + 1 to idsSpan.Length - 1 do
+                        let id1 = idsSpan[i]
+                        let id2 = idsSpan[j]
+
+                        let island1 = &getIslandRef id1 r
+                        let island2 = &getIslandRef id2 r
+
+                        if island1.IsAwake || island2.IsAwake then
+                            let pairKey = ContactKey.key id1 id2
+
+                            if collidingIslandPairs.Add pairKey then
+                                if not <| Collision.checkCollisionAABB island1.MinAABB island1.MaxAABB island2.MinAABB island2.MaxAABB then
+                                    collidingIslandPairs.Remove pairKey |> ignore
+            
+            collidingIslandPairs
+ 
         let addBody bodyId r=
             let mutable isFound = false
             let islandId = &CollectionsMarshal.GetValueRefOrAddDefault(r._bodyToIslandMap, bodyId, &isFound)
@@ -2579,18 +2647,7 @@ module Engine =
     let nextBodyId engine = engine._bodyRepo |> Body.nextId
     
     [<RequireQualifiedAccess>]
-    module Simulation =
-        [<RequireQualifiedAccess>]
-        module private IslandGridPhase =
-            let inline packKey (gridX: int) (gridY: int) =
-                (int64 gridX <<< 32) ||| (int64 gridY &&& 0xFFFFFFFFL)
-
-            let inline resetGrid (grid: Dictionary<_, PooledList<_>>) =
-                grid.Values |> Seq.iter _.Clear()
-
-            let inline worldToGridCoord (pos: double) (cellSize: double) =
-                Math.Floor(pos / cellSize) |> int
-                
+    module Simulation = 
         let inline private isPointInsideOBB (point: Vector3) (obbPos: Vector3) (obbDims: Vector3) (obbOrient: Matrix3x3) =
             let h = obbDims / 2.0
             let mutable delta = point - obbPos
@@ -3496,68 +3553,6 @@ module Engine =
                         let totalImpulseScalar = resolveStaticCollision &b1 stableResult
                         resolveStaticFriction &b1 finalNormal totalImpulseScalar b1.InvMass dt
         
-        let private detectBroadPhaseIslandPairs engine=
-            let islandRepo = engine._islandRepo
-            let buffers = engine._buffers
-            let grid = islandRepo.IslandGrid
-            let cellSize = islandRepo.GridCellSize
-            let worldX = WorldLimits.X
-            let worldY = WorldLimits.Y
-            
-            IslandGridPhase.resetGrid grid
-
-            let populate (islandId: int) =
-                let island = &Island.getIslandRef islandId islandRepo
-                let minCorner = island.MinAABB
-                let maxCorner = island.MaxAABB
-                let minGridX = IslandGridPhase.worldToGridCoord minCorner.X cellSize
-                let maxGridX = IslandGridPhase.worldToGridCoord maxCorner.X cellSize
-                let minGridY = IslandGridPhase.worldToGridCoord minCorner.Y cellSize
-                let maxGridY = IslandGridPhase.worldToGridCoord maxCorner.Y cellSize
-
-                let gridCellsX = IslandGridPhase.worldToGridCoord worldX cellSize
-                let gridCellsY = IslandGridPhase.worldToGridCoord worldY cellSize
-
-                for gx = minGridX to maxGridX do
-                    for gy = minGridY to maxGridY do
-                        let wrappedGx = (gx % gridCellsX + gridCellsX) % gridCellsX
-                        let wrappedGy = (gy % gridCellsY + gridCellsY) % gridCellsY
-
-                        let key = IslandGridPhase.packKey wrappedGx wrappedGy
-                        
-                        let mutable isListExists = false
-                        let list = &CollectionsMarshal.GetValueRefOrAddDefault(grid, key, &isListExists)
-                        if not <| isListExists then
-                            list <- new PooledList<int>()
-                        
-                        if not <| list.Span.Contains islandId then
-                            list.Add islandId
-
-            islandRepo.ActiveIslandIds |> Seq.iter populate
-            islandRepo.SleepingIslandIds |> Seq.iter populate
-            
-            let collidingIslandPairs = buffers.CollisionIslandPairs
-            collidingIslandPairs.Clear()
-
-            for idsInCell in grid.Values do
-                let idsSpan = idsInCell.Span
-                for i = 0 to idsSpan.Length - 1 do
-                    for j = i + 1 to idsSpan.Length - 1 do
-                        let id1 = idsSpan[i]
-                        let id2 = idsSpan[j]
-
-                        let island1 = &Island.getIslandRef id1 islandRepo
-                        let island2 = &Island.getIslandRef id2 islandRepo
-
-                        if island1.IsAwake || island2.IsAwake then
-                            let pairKey = ContactKey.key id1 id2
-
-                            if collidingIslandPairs.Add pairKey then
-                                if not <| Collision.checkCollisionAABB island1.MinAABB island1.MaxAABB island2.MinAABB island2.MaxAABB then
-                                    collidingIslandPairs.Remove pairKey |> ignore
-            
-            collidingIslandPairs
- 
         let private resolveNarrowPhaseCollisions
             collidingIslandPairs
             sub_dt
@@ -3806,7 +3801,7 @@ module Engine =
                     Body.updateAABB &foundBody
                     SpatialHash.add &foundBody engine._buffers engine._activeHash
 
-            let collidingIslandPairs = engine |> detectBroadPhaseIslandPairs
+            let collidingIslandPairs = engine._islandRepo |> Island.detectBroadPhaseIslandPairs engine._buffers
             
             let resolutionPasses = 8
             let sub_dt = engine._dt / double resolutionPasses
