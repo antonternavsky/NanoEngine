@@ -1794,7 +1794,7 @@ module Engine =
             new(id) =
                 {
                     Id = id
-                    Bodies = new PooledSet<_>()
+                    Bodies = new PooledList<_>()
                     _contactsHolder = null
                     IsAwake = true
                     FramesResting = 0
@@ -1807,7 +1807,7 @@ module Engine =
                     MaxAABB = Vector3(Double.MinValue, Double.MinValue, Double.MinValue)
                 }
             val Id: int
-            val Bodies: PooledSet<int>
+            val Bodies: PooledList<int>
             val mutable _contactsHolder : ContactsHolder | null
             val mutable IsAwake : bool
             val mutable FramesResting : int
@@ -1818,7 +1818,15 @@ module Engine =
             val mutable MaxPenetrationThisStep : double
             val mutable MinAABB: Vector3
             val mutable MaxAABB: Vector3
-    
+            
+            member inline this.BodiesSpan : ReadOnlySpan<int> = this.Bodies.Span
+            member inline this.AddBody bodyId =
+                if not <| this.BodiesSpan.Contains bodyId then
+                    this.Bodies.Add bodyId
+            
+            member inline this.RemoveBody bodyId =
+                Utils.removeBySwapBack bodyId this.Bodies |> ignore
+
             member inline this.UpdateMaxPenetration depth =
                 if depth > this.MaxPenetrationThisStep then
                     this.MaxPenetrationThisStep <- depth
@@ -1881,7 +1889,7 @@ module Engine =
             island.MinAABB <- Vector3(Double.MaxValue, Double.MaxValue, Double.MaxValue)
             island.MaxAABB <- Vector3(Double.MinValue, Double.MinValue, Double.MinValue)
 
-            for bodyId in island.Bodies do
+            for bodyId in island.BodiesSpan do
                 let body = &Body.getRef bodyId bodyRepo
                 if not <| Unsafe.IsNullRef &body then
                     island.MinAABB.X <- min island.MinAABB.X body.MinAABB.X
@@ -1964,13 +1972,13 @@ module Engine =
         let init r =   
             for bodyId in r._bodyRepo |> Body.getKeys do
                 let newIsland = r |> newIsland
-                newIsland.Bodies.Add bodyId |> ignore
+                newIsland.AddBody bodyId
                 r._bodyToIslandMap.Add(bodyId, newIsland.Id)
                 r._allIslands.Add(newIsland.Id, newIsland)
                 r._activeIslandIds.Add newIsland.Id |> ignore
 
         let private buildAdjacencyMap
-            (bodies: ICollection<int>)
+            (bodies: ReadOnlySpan<int>)
             (contactKeys: ICollection<int64>)
             =
             
@@ -2014,7 +2022,7 @@ module Engine =
             newComponent
             
         let private findConnectedComponents
-            (bodiesToAnalyze: ICollection<int>)
+            (bodiesToAnalyze: ReadOnlySpan<int>)
             (island: inref<T>) =
             use adjacencyMap = buildAdjacencyMap bodiesToAnalyze (island.GetContactKeys())
             let result = new PooledList<PooledList<int>>()
@@ -2086,10 +2094,10 @@ module Engine =
             (island: inref<T>)
             r =
             
-            if island.Bodies.Count = 0 then
+            if island.BodiesSpan.Length = 0 then
                 true
-            elif island.Bodies.Count = 1 then
-                let bodyId = island.Bodies.GetEnumerator().Current
+            elif island.BodiesSpan.Length = 1 then
+                let bodyId = island.BodiesSpan[0]
                 let body = &Body.getRef bodyId bodyRepo
                 if Unsafe.IsNullRef &body then
                     false
@@ -2098,7 +2106,7 @@ module Engine =
                     hasStaticSupport &body occupiedCells geometryRepo r
             else
                 use anchors = new PooledList<int>()
-                for bodyId in island.Bodies do
+                for bodyId in island.BodiesSpan do
                     let body = &Body.getRef bodyId bodyRepo
                     if not <| Unsafe.IsNullRef &body then
                         let occupiedCells = SpatialHash.getOccupiedCells bodyId activeHash
@@ -2107,10 +2115,10 @@ module Engine =
 
                 if anchors.Count = 0 then
                     false
-                elif anchors.Count = island.Bodies.Count then
+                elif anchors.Count = island.BodiesSpan.Length then
                     true
                 else
-                    use adjacencyMap = buildAdjacencyMap island.Bodies (island.GetContactKeys())
+                    use adjacencyMap = buildAdjacencyMap island.BodiesSpan (island.GetContactKeys())
                     use visited = new PooledSet<int>()
                     use queue = new PooledQueue<int>()
                     
@@ -2127,7 +2135,7 @@ module Engine =
                                     queue.Enqueue neighborId
                         | _ -> ()
                         
-                    let isGrounded = visited.Count = island.Bodies.Count
+                    let isGrounded = visited.Count = island.BodiesSpan.Length
                     
                     adjacencyMap.Values |> Seq.iter Dispose.action
                     
@@ -2145,7 +2153,7 @@ module Engine =
                 let newIsland = r |> newIsland
                 r._allIslands.Add(newIsland.Id, newIsland)
                 islandId <- newIsland.Id
-                newIsland.Bodies.Add bodyId |> ignore
+                newIsland.AddBody bodyId
                 r._activeIslandIds.Add newIsland.Id |> ignore
                 
         let removeBody bodyId r =
@@ -2154,8 +2162,8 @@ module Engine =
                 r._bodyToIslandMap.Remove bodyId |> ignore
                 
                 let island = &getIslandRef islandId r
-                island.Bodies.Remove bodyId |> ignore
-                if island.Bodies.Count = 0 then
+                island.RemoveBody bodyId |> ignore
+                if island.BodiesSpan.Length = 0 then
                     if not <| r._removeIslandsBuffer.Contains islandId then
                        r._removeIslandsBuffer.Add islandId
                        
@@ -2175,10 +2183,9 @@ module Engine =
                     targetIsland.FramesResting <- 0
                     targetIsland.IsGrounded <- sourceIsland.IsGrounded || targetIsland.IsGrounded
                     targetIsland.UpdateMaxPenetration sourceIsland.MaxPenetrationThisStep
-                    
-                    use bodiesToMove = new PooledList<int>(sourceIsland.Bodies)
-                    for bodyId in bodiesToMove.Span do
-                        targetIsland.Bodies.Add bodyId |> ignore
+
+                    for bodyId in sourceIsland.BodiesSpan do
+                        targetIsland.AddBody bodyId
                         r._bodyToIslandMap[bodyId] <- targetId
                     
                     targetIsland.MergeContactsFrom &sourceIsland
@@ -2290,7 +2297,7 @@ module Engine =
                     // start the tedious and expensive procedure of assembling back into the island again
                     // island.ContactTTL.Clear()
                     
-                    for bodyId in island.Bodies do
+                    for bodyId in island.BodiesSpan do
                         r._sleepingHash |> SpatialHash.remove bodyId
                         let body = &Body.getRef bodyId r._bodyRepo
                         if not <| Unsafe.IsNullRef &body then
@@ -2311,7 +2318,7 @@ module Engine =
             for islandIdToSplit in r._islandsMarkedForSplit do
                 let mutable originalIsland = &getIslandRef islandIdToSplit r
                 if not <| Unsafe.IsNullRef &originalIsland then
-                    use components = findConnectedComponents originalIsland.Bodies &originalIsland
+                    use components = findConnectedComponents originalIsland.BodiesSpan &originalIsland
 
                     if components.Count <= 1 then
                         components |> Seq.iter Dispose.action
@@ -2340,13 +2347,14 @@ module Engine =
                                 r._logger.Debug("New island fragment {IslandId} with {ComponentCount} was created", newFragmentIsland.Id, fragmentComponent.Count)
 
                                 for bodyId in fragmentComponent.Span do
-                                    newFragmentIsland.Bodies.Add bodyId |> ignore
-                                    originalIsland.Bodies.Remove bodyId |> ignore
+                                    newFragmentIsland.AddBody bodyId
+                                    originalIsland.RemoveBody bodyId |> ignore
                                     r._bodyToIslandMap[bodyId] <- newFragmentIsland.Id
 
+                                let fragmentBodiesSpan = newFragmentIsland.BodiesSpan
                                 for contactKey in originalContactKeys do
                                     let struct(id1, id2) = ContactKey.unpack contactKey
-                                    if newFragmentIsland.Bodies.Contains id1 && newFragmentIsland.Bodies.Contains id2 then
+                                    if fragmentBodiesSpan.Contains id1 && fragmentBodiesSpan.Contains id2 then
                                        let mutable cachedAxis = -1
                                        originalIsland.TryGetCachedAxis(contactKey, &cachedAxis) |> ignore
                                        newFragmentIsland.AddOrUpdateContact(contactKey, CONTACT_TTL, cachedAxis)
@@ -2372,9 +2380,10 @@ module Engine =
                         recalculateAABB &originalIsland r._bodyRepo
                         
                         use contactsToRemove = new PooledList<int64>()
+                        let originalIslandBodiesSpan = originalIsland.BodiesSpan
                         for contactKey in originalContactKeys do
                             let struct(id1, id2) = ContactKey.unpack contactKey
-                            if not <| originalIsland.Bodies.Contains id1 || not <| originalIsland.Bodies.Contains id2 then
+                            if not <| originalIslandBodiesSpan.Contains id1 || not <| originalIslandBodiesSpan.Contains id2 then
                                 contactsToRemove.Add contactKey
                         
                         for key in contactsToRemove.Span do
@@ -2396,9 +2405,10 @@ module Engine =
                         island |> Dispose.action                       
                     elif island.IsAwake then
                         let mutable isStillEligibleForSleep = true
-                        let mutable enumerator = island.Bodies.GetEnumerator()
-                        while isStillEligibleForSleep && enumerator.MoveNext() do
-                            let bodyId = enumerator.Current
+                        let mutable i = 0
+                        while isStillEligibleForSleep && i < island.BodiesSpan.Length do
+                            let bodyId = island.BodiesSpan[i]
+                            i <- i + 1
                             let body = &Body.getRef bodyId r._bodyRepo
                             if not <| Unsafe.IsNullRef &body && body.Velocity.MagnitudeSq() >= SLEEP_VELOCITY_THRESHOLD_SQ then
                                 isStillEligibleForSleep <- false
@@ -2406,7 +2416,7 @@ module Engine =
                         if isStillEligibleForSleep then
                             island.IsAwake <- false
                             island.MaxPenetrationThisStep <- 0.0
-                            for bodyId in island.Bodies do
+                            for bodyId in island.BodiesSpan do
                                 r._activeHash |> SpatialHash.remove bodyId
                                 let body = &Body.getRef bodyId r._bodyRepo
                                 if not <| Unsafe.IsNullRef &body then
@@ -2596,6 +2606,9 @@ module Engine =
             activeHash
             sleepingHash =
 
+            let mutable p = p
+            WorldLimits.wrapPosition &p
+            
             let checkPos = Vector3(p.X, p.Y, p.Z - PENETRATION_SLOP)
             let key = checkPos |> Grid.convertWorldToSubPrismCoords |> SubPrismKey.pack
 
@@ -2617,11 +2630,11 @@ module Engine =
                 if checkWorldPosForSupport point geometryRepo bodyRepo &body activeHash sleepingHash then
                     true
                 else
-                    let radius = HEX_RADIUS * 0.1
+                    let radius = HEX_RADIUS * 0.16
                     if checkWorldPosForSupport (point + Vector3(radius, 0.0, 0.0)) geometryRepo bodyRepo &body activeHash sleepingHash then true
                     elif checkWorldPosForSupport (point - Vector3(radius, 0.0, 0.0)) geometryRepo bodyRepo &body activeHash sleepingHash then true
                     elif checkWorldPosForSupport (point + Vector3(0.0, radius, 0.0)) geometryRepo bodyRepo &body activeHash sleepingHash then true
-                    elif checkWorldPosForSupport (point - Vector3(0.0, -radius, 0.0)) geometryRepo bodyRepo &body activeHash sleepingHash then true
+                    elif checkWorldPosForSupport (point - Vector3(0.0, radius, 0.0)) geometryRepo bodyRepo &body activeHash sleepingHash then true
                     else false
         
         let isPointSupported
@@ -2677,7 +2690,6 @@ module Engine =
                 let bottomCenterOffset = body.Orientation * Vector3(0.0, 0.0, -h.Z)
                 let mutable projectedCenterOfMass = body.Position + bottomCenterOffset
                 WorldLimits.wrapPosition &projectedCenterOfMass
-                
                 let isCenterOfMassSupported = isPointSupported geometryRepo bodyRepo &body activeHash sleepingHash projectedCenterOfMass
                 if isCenterOfMassSupported then
                     ValueNone
@@ -3009,7 +3021,7 @@ module Engine =
             let activeIslands = islandRepo |> Island.getActiveIslandIds
             for islandId in activeIslands do
                 let island = &Island.getIslandRef islandId islandRepo
-                for id in island.Bodies do
+                for id in island.BodiesSpan do
                     let body = &Body.getRef id bodyRepo
                     if not <| Unsafe.IsNullRef &body && body.IsForceFalling && not body.IsFallingOver then
                         bodiesToInitiateFall.Add id
@@ -3027,7 +3039,7 @@ module Engine =
 
             for islandId in activeIslands do
                 let island = &Island.getIslandRef islandId islandRepo
-                for id in island.Bodies do
+                for id in island.BodiesSpan do
                     let body = &Body.getRef id bodyRepo
                     if not <| Unsafe.IsNullRef &body && body.IsFallingOver then                
                         let previousPosition = body.Position
@@ -3550,7 +3562,7 @@ module Engine =
 
             for activeId1 in islandRepo |> Island.getActiveIslandIds do
                 let activeIsland1 = &Island.getIslandRef activeId1 islandRepo
-                for id1 in activeIsland1.Bodies do
+                for id1 in activeIsland1.BodiesSpan do
                     let b1 = &Body.getRef id1 bodyRepo
                     let invMass1 = if b1.IsFallingOver then 0.0 else b1.InvMass
                     resolveFloorAndCeilingCollisions &b1 invMass1 islandRepo sub_dt
@@ -3595,7 +3607,7 @@ module Engine =
                 let otherIsland = if island1.IsAwake then &island2 else &island1
 
                 // We go through all the bodies of the active island from the pair
-                for bodyId1 in activeIsland.Bodies do
+                for bodyId1 in activeIsland.BodiesSpan do
                     let b1 = &Body.getRef bodyId1 bodyRepo
                     let occupiedCells = SpatialHash.getOccupiedCells bodyId1 activeHash
                     for cellKey in occupiedCells do
@@ -3604,7 +3616,7 @@ module Engine =
                         let otherHash = if otherIsland.IsAwake then activeHash else sleepingHash
                         for bodyId2 in SpatialHash.query cellKey otherHash do
                             // We make sure that the body belongs to the second island in the pair
-                            if otherIsland.Bodies.Contains bodyId2 then
+                            if otherIsland.BodiesSpan.Contains bodyId2 then
                                 let contactKey = ContactKey.key bodyId1 bodyId2
                                 if checkedBodyPairs.Add contactKey then
                                     let b2 = &Body.getRef bodyId2 bodyRepo
@@ -3629,9 +3641,10 @@ module Engine =
                     if island.Bodies.Count > 1 && island.HadContactsRemovedThisStep && island.ContactCount < island.Bodies.Count - 1 then
                         islandRepo |> Island.requestSplit island.Id
                     let mutable isStillSlow = true
-                    let mutable enumerator = island.Bodies.GetEnumerator()
-                    while isStillSlow && enumerator.MoveNext() do
-                        let bodyId = enumerator.Current
+                    let mutable i = 0
+                    while isStillSlow && i < island.BodiesSpan.Length do
+                        let bodyId = island.BodiesSpan[i]
+                        i <- i + 1
                         let body = &Body.getRef bodyId bodyRepo
                         if not <| Unsafe.IsNullRef &body then
                             processedBushes.Clear()
@@ -3659,9 +3672,10 @@ module Engine =
                             
                             if island.FramesResting >= FRAMES_TO_SLEEP && island.CantSleepFrames <= 0 then
                                 let mutable isIslandStable = true
-                                let mutable fallCheckEnumerator = island.Bodies.GetEnumerator()
-                                while isIslandStable && fallCheckEnumerator.MoveNext() do
-                                    let bodyId = fallCheckEnumerator.Current
+                                let mutable i = 0
+                                while isIslandStable && i < island.BodiesSpan.Length do
+                                    let bodyId = island.BodiesSpan[i]
+                                    i <- i + 1
                                     let body = &Body.getRef bodyId bodyRepo
                                     if not <| Unsafe.IsNullRef &body then
                                         match tryInitiateFall &body geometryRepo bodyRepo activeHash sleepingHash with
@@ -3700,7 +3714,7 @@ module Engine =
                                         | ValueNone -> ()
                                         
                                 if isIslandStable then
-                                    for bodyId in island.Bodies do
+                                    for bodyId in island.BodiesSpan do
                                         let body = &Body.getRef bodyId bodyRepo
                                         if not <| Unsafe.IsNullRef &body then
                                             Body.updateAABB &body
@@ -3756,7 +3770,7 @@ module Engine =
             for islandId in engine._islandRepo.ActiveIslandIds do
                 let mutable island = &Island.getIslandRef islandId engine._islandRepo
                 island.NextStep() 
-                for bodyId in island.Bodies do
+                for bodyId in island.BodiesSpan do
                     let body = &Body.getRef bodyId engine._bodyRepo
                     if not <| Unsafe.IsNullRef &body then
                         Body.updateAABB &body
@@ -3784,7 +3798,7 @@ module Engine =
 
                 for islandId in engine._islandRepo.ActiveIslandIds do
                     let island = &Island.getIslandRef islandId engine._islandRepo
-                    for bodyId in island.Bodies do
+                    for bodyId in island.BodiesSpan do
                         let body = &Body.getRef bodyId engine._bodyRepo
                         if not <| Unsafe.IsNullRef &body && not <| body.IsFallingOver then                          
                             let vSq = body.Velocity.MagnitudeSq()
