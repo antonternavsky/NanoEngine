@@ -1226,30 +1226,6 @@ module Engine =
             updateCollection r._trees
             updateCollection r._bushes
 
-    type EndpointType =
-        | Start = 0uy
-        | End = 1uy
-
-    [<Struct; CustomEquality; CustomComparison; IsReadOnly>]
-    type IslandEndpoint =
-        new(islandId, value : double, endpointType) =
-            {
-                IslandId = islandId
-                Value = value
-                Type = endpointType
-            }
-            
-        val IslandId: int
-        val Value: double
-        val Type: EndpointType
-        interface IEquatable<IslandEndpoint> with
-            member this.Equals other =
-                this.IslandId = other.IslandId
-                && this.Type = other.Type
-                && this.Value.Equals other.Value
-        interface IComparable<IslandEndpoint> with
-            member this.CompareTo other = this.Value.CompareTo other.Value
-        
     [<Struct>]
     type Buffers =
         {
@@ -1260,8 +1236,6 @@ module Engine =
             SnapPointsBuffer: PooledList<Vector3>
             CollisionCheckedBodyPairs : HashSet<int64>
             CollisionIslandPairs: HashSet<int64>
-            CollisionIslandEndpoints : PooledList<IslandEndpoint>
-            CollisionActiveSweepList : PooledList<int>
             CollisionDestroyedFlora: HashSet<int>
             CollisionProcessedStatic: HashSet<uint64>
             CollisionProcessedFlora: HashSet<int>
@@ -1293,8 +1267,6 @@ module Engine =
             
             this.CollisionCheckedBodyPairs.Clear()
             this.CollisionIslandPairs.Clear()
-            this.CollisionIslandEndpoints.Clear()
-            this.CollisionActiveSweepList.Clear()
             this.CollisionDestroyedFlora.Clear()
             this.CollisionProcessedStatic.Clear()
             this.CollisionProcessedFlora.Clear()
@@ -1313,8 +1285,6 @@ module Engine =
                 SnapPointsBuffer = new PooledList<_>()
 
                 CollisionCheckedBodyPairs = HashSet()
-                CollisionIslandEndpoints = new PooledList<_>()
-                CollisionActiveSweepList = new PooledList<_>()
                 CollisionIslandPairs = HashSet()
                 CollisionDestroyedFlora = HashSet()
                 CollisionProcessedStatic = HashSet()
@@ -1886,19 +1856,47 @@ module Engine =
                 member this.Dispose() = this.Dispose()
         
         let recalculateAABB (island: byref<T>) bodyRepo =
-            island.MinAABB <- Vector3(Double.MaxValue, Double.MaxValue, Double.MaxValue)
-            island.MaxAABB <- Vector3(Double.MinValue, Double.MinValue, Double.MinValue)
+            let bodyCount = island.BodiesSpan.Length
+            if bodyCount = 0 then
+                island.MinAABB <- Vector3(Double.MaxValue, Double.MaxValue, Double.MaxValue)
+                island.MaxAABB <- Vector3(Double.MinValue, Double.MinValue, Double.MinValue)
+            else
+                let firstBody = &Body.getRef island.BodiesSpan[0] bodyRepo
+                let mutable referencePos = firstBody.Position
+                let mutable averageRelativePos = Vector3.Zero
 
-            for bodyId in island.BodiesSpan do
-                let body = &Body.getRef bodyId bodyRepo
-                if not <| Unsafe.IsNullRef &body then
-                    island.MinAABB.X <- min island.MinAABB.X body.MinAABB.X
-                    island.MinAABB.Y <- min island.MinAABB.Y body.MinAABB.Y
-                    island.MinAABB.Z <- min island.MinAABB.Z body.MinAABB.Z
-                    
-                    island.MaxAABB.X <- max island.MaxAABB.X body.MaxAABB.X
-                    island.MaxAABB.Y <- max island.MaxAABB.Y body.MaxAABB.Y
-                    island.MaxAABB.Z <- max island.MaxAABB.Z body.MaxAABB.Z
+                for i = 1 to bodyCount - 1 do
+                    let body = &Body.getRef island.BodiesSpan[i] bodyRepo
+                    if not <| Unsafe.IsNullRef &body then
+                        let mutable delta = body.Position - referencePos
+                        WorldLimits.relative &delta
+                        averageRelativePos <- averageRelativePos + delta
+
+                let mutable centroid = referencePos + averageRelativePos / (double bodyCount)
+                WorldLimits.wrapPosition &centroid
+
+                let mutable minExtents = Vector3(Double.MaxValue, Double.MaxValue, Double.MaxValue)
+                let mutable maxExtents = Vector3(Double.MinValue, Double.MinValue, Double.MinValue)
+                
+                for bodyId in island.BodiesSpan do
+                    let body = &Body.getRef bodyId bodyRepo
+                    if not <| Unsafe.IsNullRef &body then
+                        let mutable deltaMin = body.MinAABB - centroid
+                        WorldLimits.relative &deltaMin
+
+                        let mutable deltaMax = body.MaxAABB - centroid
+                        WorldLimits.relative &deltaMax
+
+                        minExtents.X <- min minExtents.X deltaMin.X
+                        minExtents.Y <- min minExtents.Y deltaMin.Y
+                        minExtents.Z <- min minExtents.Z deltaMin.Z
+
+                        maxExtents.X <- max maxExtents.X deltaMax.X
+                        maxExtents.Y <- max maxExtents.Y deltaMax.Y
+                        maxExtents.Z <- max maxExtents.Z deltaMax.Z
+
+                island.MinAABB <- centroid + minExtents
+                island.MaxAABB <- centroid + maxExtents
             
         type Repo =
             private
@@ -1921,12 +1919,20 @@ module Engine =
                     _staticSupportCache: Dictionary<int, bool>
                     _freeIds : List<int>
                     _logger : ILogger
+                    _islandGrid: Dictionary<int64, PooledList<int>>
+                    _gridCellSize: double
                     mutable _currentId: int
                 }
             member this.ActiveIslandIds = this._activeIslandIds
             member this.SleepingIslandIds = this._sleepingIslandIds
-
-            member this.Dispose() = this._allIslands.Values |> Seq.iter Dispose.action
+            member this.IslandGrid = this._islandGrid
+            member this.GridCellSize = this._gridCellSize
+            
+            member this.Dispose() =
+                this._allIslands.Values |> Seq.iter Dispose.action
+                this._allIslands.Clear()
+                this._islandGrid.Values |> Seq.iter Dispose.action
+                this._islandGrid.Clear()
                 
             interface IDisposable with
                 member this.Dispose() = this.Dispose()
@@ -1954,6 +1960,8 @@ module Engine =
                 _staticSupportCache = Dictionary()
                 _freeIds = List()
                 _logger = Log.ForContext<Repo>()
+                _islandGrid = Dictionary<_,_>()
+                _gridCellSize = MAX_DIMENSION * 2.0 
                 _currentId = -1
             }
 
@@ -2162,7 +2170,7 @@ module Engine =
                 r._bodyToIslandMap.Remove bodyId |> ignore
                 
                 let island = &getIslandRef islandId r
-                island.RemoveBody bodyId |> ignore
+                island.RemoveBody bodyId
                 if island.BodiesSpan.Length = 0 then
                     if not <| r._removeIslandsBuffer.Contains islandId then
                        r._removeIslandsBuffer.Add islandId
@@ -2348,7 +2356,7 @@ module Engine =
 
                                 for bodyId in fragmentComponent.Span do
                                     newFragmentIsland.AddBody bodyId
-                                    originalIsland.RemoveBody bodyId |> ignore
+                                    originalIsland.RemoveBody bodyId
                                     r._bodyToIslandMap[bodyId] <- newFragmentIsland.Id
 
                                 let fragmentBodiesSpan = newFragmentIsland.BodiesSpan
@@ -2571,9 +2579,19 @@ module Engine =
     let nextBodyId engine = engine._bodyRepo |> Body.nextId
     
     [<RequireQualifiedAccess>]
-    module Simulation =          
-        let inline private isPointInsideOBB (point: Vector3) (obbPos: Vector3) (obbDims: Vector3) (obbOrient: Matrix3x3) =
+    module Simulation =
+        [<RequireQualifiedAccess>]
+        module private IslandGridPhase =
+            let inline packKey (gridX: int) (gridY: int) =
+                (int64 gridX <<< 32) ||| (int64 gridY &&& 0xFFFFFFFFL)
 
+            let inline resetGrid (grid: Dictionary<_, PooledList<_>>) =
+                grid.Values |> Seq.iter _.Clear()
+
+            let inline worldToGridCoord (pos: double) (cellSize: double) =
+                Math.Floor(pos / cellSize) |> int
+                
+        let inline private isPointInsideOBB (point: Vector3) (obbPos: Vector3) (obbDims: Vector3) (obbOrient: Matrix3x3) =
             let h = obbDims / 2.0
             let mutable delta = point - obbPos
             WorldLimits.relative &delta
@@ -2582,7 +2600,7 @@ module Engine =
             abs(localPoint.Y) <= h.Y + PENETRATION_SLOP  &&
             abs(localPoint.Z) <= h.Z + PENETRATION_SLOP 
 
-        let checkPartnersInHash
+        let private checkPartnersInHash
             checkPoint
             bodyRepo
             checkPointCellKey
@@ -3478,66 +3496,68 @@ module Engine =
                         let totalImpulseScalar = resolveStaticCollision &b1 stableResult
                         resolveStaticFriction &b1 finalNormal totalImpulseScalar b1.InvMass dt
         
-        let private addIslandEndpoints (endpoints: PooledList<IslandEndpoint>) (island: inref<Island.T>) =
-            let minX = island.MinAABB.X
-            let maxX = island.MaxAABB.X
-            let minY = island.MinAABB.Y
-            let maxY = island.MaxAABB.Y
-            let worldX = WorldLimits.X
-            let islandId = island.Id
-            let margin = MAX_DIMENSION / 2.0
-            let yBucketHeight = MAX_DIMENSION * 2.0
-            
-            let startYBucketIndex = Math.Floor(minY / yBucketHeight) |> int
-            let endYBucketIndex = Math.Floor(maxY / yBucketHeight) |> int
-
-            for yBucket = startYBucketIndex to endYBucketIndex do
-                let xOffset = (yBucket |> double) * worldX
-
-                let isNearXEdge = minX < margin || maxX > (worldX - margin)
-
-                if isNearXEdge then
-                    endpoints.Add(IslandEndpoint(islandId, -MAX_DIMENSION + xOffset, EndpointType.Start))
-                    endpoints.Add(IslandEndpoint(islandId, MAX_DIMENSION + xOffset, EndpointType.End))
-                else
-                    endpoints.Add(IslandEndpoint(islandId, minX + xOffset, EndpointType.Start))
-                    endpoints.Add(IslandEndpoint(islandId, maxX + xOffset, EndpointType.End))
-
         let private detectBroadPhaseIslandPairs engine=
             let islandRepo = engine._islandRepo
             let buffers = engine._buffers
+            let grid = islandRepo.IslandGrid
+            let cellSize = islandRepo.GridCellSize
+            let worldX = WorldLimits.X
+            let worldY = WorldLimits.Y
+            
+            IslandGridPhase.resetGrid grid
 
+            let populate (islandId: int) =
+                let island = &Island.getIslandRef islandId islandRepo
+                let minCorner = island.MinAABB
+                let maxCorner = island.MaxAABB
+                let minGridX = IslandGridPhase.worldToGridCoord minCorner.X cellSize
+                let maxGridX = IslandGridPhase.worldToGridCoord maxCorner.X cellSize
+                let minGridY = IslandGridPhase.worldToGridCoord minCorner.Y cellSize
+                let maxGridY = IslandGridPhase.worldToGridCoord maxCorner.Y cellSize
+
+                let gridCellsX = IslandGridPhase.worldToGridCoord worldX cellSize
+                let gridCellsY = IslandGridPhase.worldToGridCoord worldY cellSize
+
+                for gx = minGridX to maxGridX do
+                    for gy = minGridY to maxGridY do
+                        let wrappedGx = (gx % gridCellsX + gridCellsX) % gridCellsX
+                        let wrappedGy = (gy % gridCellsY + gridCellsY) % gridCellsY
+
+                        let key = IslandGridPhase.packKey wrappedGx wrappedGy
+                        
+                        let mutable isListExists = false
+                        let list = &CollectionsMarshal.GetValueRefOrAddDefault(grid, key, &isListExists)
+                        if not <| isListExists then
+                            list <- new PooledList<int>()
+                        
+                        if not <| list.Span.Contains islandId then
+                            list.Add islandId
+
+            islandRepo.ActiveIslandIds |> Seq.iter populate
+            islandRepo.SleepingIslandIds |> Seq.iter populate
+            
             let collidingIslandPairs = buffers.CollisionIslandPairs
-            let endpoints = buffers.CollisionIslandEndpoints
-            let activeSweepList = buffers.CollisionActiveSweepList
-
             collidingIslandPairs.Clear()
-            endpoints.Clear()
-            activeSweepList.Clear()
 
-            for islandId in islandRepo |> Island.getActiveIslandIds do
-                addIslandEndpoints endpoints (&Island.getIslandRef islandId islandRepo)
-            for islandId in islandRepo |> Island.getSleepingIslandIds do
-                addIslandEndpoints endpoints (&Island.getIslandRef islandId islandRepo)
+            for idsInCell in grid.Values do
+                let idsSpan = idsInCell.Span
+                for i = 0 to idsSpan.Length - 1 do
+                    for j = i + 1 to idsSpan.Length - 1 do
+                        let id1 = idsSpan[i]
+                        let id2 = idsSpan[j]
+
+                        let island1 = &Island.getIslandRef id1 islandRepo
+                        let island2 = &Island.getIslandRef id2 islandRepo
+
+                        if island1.IsAwake || island2.IsAwake then
+                            let pairKey = ContactKey.key id1 id2
+
+                            if collidingIslandPairs.Add pairKey then
+                                if not <| Collision.checkCollisionAABB island1.MinAABB island1.MaxAABB island2.MinAABB island2.MaxAABB then
+                                    collidingIslandPairs.Remove pairKey |> ignore
             
-            endpoints.Span.Sort()
-
-            for endpoint in endpoints.Span do
-                if endpoint.Type = EndpointType.Start then
-                    let island1 = &Island.getIslandRef endpoint.IslandId islandRepo
-                    for otherIslandId in activeSweepList.Span do
-                        let island2 = &Island.getIslandRef otherIslandId islandRepo
-
-                        if Collision.checkCollisionAABB island1.MinAABB island1.MaxAABB island2.MinAABB island2.MaxAABB then
-                            let key = ContactKey.key endpoint.IslandId otherIslandId
-                            collidingIslandPairs.Add key |> ignore
-                    
-                    activeSweepList.Add endpoint.IslandId
-                else
-                    Utils.removeBySwapBack endpoint.IslandId activeSweepList |> ignore
-
             collidingIslandPairs
-            
+ 
         let private resolveNarrowPhaseCollisions
             collidingIslandPairs
             sub_dt
