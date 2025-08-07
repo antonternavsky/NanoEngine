@@ -762,9 +762,6 @@ module Engine =
             (corners: Span<Vector3>)
             (minAABB: Vector3)
             (maxAABB: Vector3)
-            (p: Vector3)
-            (d: Vector3)
-            (o: Matrix3x3) 
             (filter: HashSet<uint64>) =
             let mutable rawMinQ, rawMaxQ = Int32.MaxValue, Int32.MinValue
             let mutable rawMinR, rawMaxR = Int32.MaxValue, Int32.MinValue
@@ -796,23 +793,11 @@ module Engine =
                                 let inline checkAndAddSubPrisms (startIndex: int) (endIndex: int) =
                                     for sub_idx = startIndex to endIndex do
                                         let subPrismCoords = SubPrismCoords.Normalize(q, r, z, sub_idx)
-                                        let struct (prismPos, prismDims, prismOrient) = subPrismCoords |> getPrismSpace
-                                        let struct(minLocal, maxLocal) = _precomputedPrismAABBs[subPrismCoords.SubIndex]
-                                        let minPrism = minLocal + prismPos
-                                        let maxPrism = maxLocal + prismPos
+                                        let struct(minPrism, maxPrism) = getTriangularPrismAABB subPrismCoords
+
                                         if Collision.checkCollisionAABB minAABB maxAABB minPrism maxPrism then
-                                            let result =
-                                                Collision.checkCollisionSAT
-                                                    p
-                                                    d
-                                                    o
-                                                    prismPos
-                                                    prismDims
-                                                    prismOrient
-                                                        
-                                            if result.AreColliding then
-                                                let key = subPrismCoords |> SubPrismKey.pack
-                                                filter.Add key |> ignore
+                                            let key = subPrismCoords |> SubPrismKey.pack
+                                            filter.Add key |> ignore
                                 
                                 if overlapsBottomHalf then
                                     checkAndAddSubPrisms 0 5
@@ -840,7 +825,7 @@ module Engine =
             let shiftedPos = p + shift
             let struct(shiftedMin, shiftedMax) = Collision.getAABB shiftedPos d o
 
-            fillGridFromCorners shiftBuffer shiftedMin shiftedMax shiftedPos d o filter
+            fillGridFromCorners shiftBuffer shiftedMin shiftedMax filter
             
         let fillOverlappingSubPrismsAABB
             (p: Vector3)
@@ -865,14 +850,7 @@ module Engine =
                 
             let struct(minAABB, maxAABB) = Collision.getAABB p d o
             
-            fillGridFromCorners
-                worldCorners
-                minAABB
-                maxAABB
-                p
-                d
-                o
-                filter
+            fillGridFromCorners worldCorners minAABB maxAABB filter
 
             let margin = (max d.X d.Y) * 1.5
             let nearMinX = minAABB.X < margin
