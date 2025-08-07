@@ -791,9 +791,11 @@ module Engine =
                                 let inline checkAndAddSubPrisms (startIndex: int) (endIndex: int) =
                                     for sub_idx = startIndex to endIndex do
                                         let subPrismCoords = SubPrismCoords.Normalize(q, r, z, sub_idx)
-                                        let struct(minPrism, maxPrism) = subPrismCoords |> getTriangularPrismAABB
+                                        let struct (prismPos, prismDims, prismOrient) = subPrismCoords |> getPrismSpace
+                                        let struct(minLocal, maxLocal) = _precomputedPrismAABBs[subPrismCoords.SubIndex]
+                                        let minPrism = minLocal + prismPos
+                                        let maxPrism = maxLocal + prismPos
                                         if Collision.checkCollisionAABB minAABB maxAABB minPrism maxPrism then
-                                            let struct(prismPos, prismDims, prismOrient) = subPrismCoords |> getPrismSpace
                                             let result =
                                                 Collision.checkCollisionSAT
                                                     p
@@ -1700,6 +1702,9 @@ module Engine =
                     _logger : ILogger
                     _islandGrid: Dictionary<uint64, PooledList<int>>
                     _gridCellSize: double
+                    _newOccupiedCellsBuffer: PooledList<uint64>
+                    _newCellsFilter : PooledSet<uint64>
+
                     mutable _currentId: int
                 }
             member this.ActiveIslandIds = this._activeIslandIds
@@ -1710,6 +1715,8 @@ module Engine =
                 this._allIslands.Clear()
                 this._islandGrid.Values |> Seq.iter Dispose.action
                 this._islandGrid.Clear()
+                this._newOccupiedCellsBuffer |> Dispose.action
+                this._newCellsFilter |> Dispose.action
                 
             interface IDisposable with
                 member this.Dispose() = this.Dispose()
@@ -1735,6 +1742,8 @@ module Engine =
                 _freeIds = List()
                 _logger = Log.ForContext<Repo>()
                 _islandGrid = Dictionary<_,_>()
+                _newOccupiedCellsBuffer = new PooledList<_>()
+                _newCellsFilter = new PooledSet<_>()
                 _gridCellSize = MAX_DIMENSION * 2.0 
                 _currentId = -1
             }
@@ -2056,8 +2065,35 @@ module Engine =
                 list.Add islandId
 
         let private updateIslandInGrid (island: byref<T>) r =
-            removeIslandFromGrid &island r
-            addIslandToGrid &island r
+            r._newOccupiedCellsBuffer.Clear()
+            calculateOccupiedCells &island r._gridCellSize r._newOccupiedCellsBuffer
+
+            r._newCellsFilter.Clear()
+            for newCell in r._newOccupiedCellsBuffer.Span do
+                r._newCellsFilter.Add newCell |> ignore
+            
+            let islandId = island.Id
+            let oldOccupiedCells = island.OccupiedGridCells
+
+            for oldCellKey in oldOccupiedCells.Span do
+                if not <| r._newCellsFilter.Remove oldCellKey then
+                    match r._islandGrid.TryGetValue oldCellKey with
+                    | true, idList ->
+                        if idList |> Utils.removeBySwapBack islandId && idList.Count = 0 then
+                            r._islandGrid.Remove oldCellKey |> ignore
+                            idList |> Dispose.action
+                    | false, _ -> ()
+
+            for newCellKey in r._newCellsFilter do
+                let mutable isListExists = false
+                let list = &CollectionsMarshal.GetValueRefOrAddDefault(r._islandGrid, newCellKey, &isListExists)
+                if not <| isListExists then
+                    list <- new PooledList<int>()
+                
+                list.Add islandId
+
+            oldOccupiedCells.Clear()
+            oldOccupiedCells.AddRange(r._newOccupiedCellsBuffer.Span)
 
         let recalculateAABBAndUpdateGrid (island: byref<T>) r =
             recalculateAABB &island r
