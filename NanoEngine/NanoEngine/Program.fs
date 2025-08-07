@@ -60,8 +60,6 @@ module Tests =
         member inline this.FloraRepo = this.Engine.Flora
         member inline this.GeometryRepo = this.Engine.Geometry
         member inline this.LiquidRepo = this.Engine.Liquid
-        member inline this.ActiveHash = this.Engine.ActiveHash
-        member inline this.SleepingHash = this.Engine.SleepingHash
         member inline this.Buffers = this.Engine.Buffers
             
     type TestRunner(initialState: TestState) =
@@ -164,6 +162,8 @@ module Tests =
         member _.CreateBody(pos, vel: Vector3, mass, dims, bType, friction) =
             Assert.IsTrue (vel.Magnitude() <= MAX_SPEED + 1e-5) "The initial velocity of the body exceeds the limit"
             let bodyId = _state.Engine |> nextBodyId
+            let mutable pos = pos
+            WorldLimits.wrapPosition &pos
             let body = Body.T(bodyId, bType, mass, dims, Matrix3x3.Identity, pos, vel, SubPrismCoords.Zero, friction)
             Body.tryAdd &body _state.BodyRepo |> ignore
             bodyId
@@ -253,7 +253,8 @@ let main _ =
                 printfn "[PASS] %s" msg
                 true
             | Failure msg ->
-                printfn "[FAIL] %s" msg
+                printfn "[FAIL] %s. STAGE: %d" msg runner.State.TestPhase
+                logBodyState runner.State i
                 false
             | InProgress ->
                 printfn "[FAIL] Test completed without result"
@@ -539,7 +540,7 @@ let main _ =
                 let wallCenterY = wallHexCenter.Y
 
                 let bulldozerWidth = 6.0
-                let bulldozerLength = 1.0
+                let bulldozerLength = 2.0
                 let bulldozerHeight = 3.0
                 let bulldozerDims = Vector3(bulldozerLength, bulldozerWidth, bulldozerHeight)
                 let clearanceFromWall = 0.5
@@ -626,7 +627,7 @@ let main _ =
                         Assert.IsTrue(p.X >= 0 && p.X <= 10 || p.X >= 65500) "p.X >= 0 && p.X <= 10 || p.X >= 65500"
                         Assert.IsTrue(p.Y >= 0 && p.Y <= 10 || p.Y >= 56700) "p.Y >= 0 && p.Y <= 10 || p.Y >= 56700"
                         
-                if sleepingIslandCount = 6 then
+                if sleepingIslandCount = 5 then
 
                     Assert.AreEqual 0 runner.State.IslandRepo.ActiveIslandIds.Count "FINISH: All islands were supposed to be asleep"
 
@@ -639,6 +640,7 @@ let main _ =
                     let dominoId = runner.Recall<int>("dominoId")
                     let bulldozerId = runner.Recall<int>("bulldozerId")
                     let smallTreeId = runner.Recall<int>("tree2Id")
+
                     let fallenTreeBodyId = 2 
 
                     let platformZ = (double 10 + 1.0) * HEX_HEIGHT
@@ -648,51 +650,47 @@ let main _ =
                     let checkIsOnSurface (bodyId: int) (surfaceZ: float) (bodyName: string) =
                         let body = runner.GetBody(bodyId)
                         let bodyBottomZ = body.Position.Z - body.Dimensions.Z / 2.0
-                        Assert.AreClose surfaceZ bodyBottomZ tolerance $"{bodyName} (ID {bodyId}) must lie on surface at height {surfaceZ:F2}"
+                        Assert.AreClose surfaceZ bodyBottomZ tolerance $"{bodyName} (ID {bodyId}) must be resting on surface Z={surfaceZ:F2}"
 
-                    let island_floor_stack = runner.GetIslandRefForBody body4Id
-                    Assert.AreEqual (set [body4Id; body5Id]) (set island_floor_stack.Bodies) "Incorrect island composition for the stack [4, 5]"
+                    let island_floor_stack = runner.GetIslandRefForBody body1Id
+                    Assert.AreEqual (set [body1Id; body4Id; body5Id]) (set island_floor_stack.Bodies) "Incorrect island composition for the stack [1, 4, 5]"
 
                     let island_bullet6 = runner.GetIslandRefForBody body6Id
-                    Assert.AreEqual (set [body6Id]) (set island_bullet6.Bodies) "Body 6 should be in its own island"
-                    
+                    Assert.AreEqual (set [body6Id]) (set island_bullet6.Bodies) "Body 6 (bullet) should be in its own island"
+
                     let island_bullet7 = runner.GetIslandRefForBody body7Id
-                    Assert.AreEqual (set [body7Id]) (set island_bullet7.Bodies) "Body 7 should be in its own island"
+                    Assert.AreEqual (set [body7Id]) (set island_bullet7.Bodies) "Body 7 (bullet) should be in its own island"
 
                     let island_domino = runner.GetIslandRefForBody dominoId
-                    Assert.AreEqual (set [dominoId]) (set island_domino.Bodies) "Domino 8 should be in its own island"
+                    Assert.AreEqual (set [dominoId]) (set island_domino.Bodies) "Body 8 (domino) should be in its own island"
 
                     let island_bulldozer_and_tree = runner.GetIslandRefForBody bulldozerId
-                    Assert.AreEqual (set [bulldozerId; fallenTreeBodyId]) (set island_bulldozer_and_tree.Bodies) "Incorrect island composition for the bulldozer and the tree"
+                    Assert.AreEqual (set [bulldozerId; fallenTreeBodyId]) (set island_bulldozer_and_tree.Bodies) "Incorrect island composition for the bulldozer and tree [9, 2]"
 
-                    checkIsOnSurface body4Id floorZ "Cube 4"
+                    checkIsOnSurface body1Id floorZ "Cube 1"
                     checkIsOnSurface body6Id floorZ "Bullet 6"
                     checkIsOnSurface body7Id floorZ "Bullet 7"
                     checkIsOnSurface dominoId platformZ "Domino 8"
                     checkIsOnSurface bulldozerId platformZ "Bulldozer 9"
+
+                    let topOfBody1 = (runner.GetBody body1Id).Position.Z + (runner.GetBody body1Id).Dimensions.Z / 2.0
+                    let bottomOfBody4 = (runner.GetBody body4Id).Position.Z - (runner.GetBody body4Id).Dimensions.Z / 2.0
+                    Assert.AreClose topOfBody1 bottomOfBody4 tolerance "Body 4 should be stacked on top of Body 1"
                     
                     let topOfBody4 = (runner.GetBody body4Id).Position.Z + (runner.GetBody body4Id).Dimensions.Z / 2.0
                     let bottomOfBody5 = (runner.GetBody body5Id).Position.Z - (runner.GetBody body5Id).Dimensions.Z / 2.0
-                    Assert.AreClose topOfBody4 bottomOfBody5 tolerance "Body 5 must be stacked on top of Body 4"
+                    Assert.AreClose topOfBody4 bottomOfBody5 tolerance "Body 5 should be stacked on top of Body 4"
 
                     let topOfBulldozer = (runner.GetBody bulldozerId).Position.Z + (runner.GetBody bulldozerId).Dimensions.Z / 2.0
                     let bottomOfFallenTree = (runner.GetBody fallenTreeBodyId).Position.Z - (runner.GetBody fallenTreeBodyId).Dimensions.Z / 2.0
                     Assert.AreClose topOfBulldozer bottomOfFallenTree tolerance "Fallen Tree (ID 2) must be resting on top of the Bulldozer (ID 9)"
-                    let body1 = runner.GetBody body1Id
-                    if body1.Position.Z > (platformZ - tolerance) then
-                        checkIsOnSurface body1Id platformZ "Cube 1"
-                        let island_platform_cube1 = runner.GetIslandRefForBody body1Id
-                        Assert.AreEqual (set [body1Id]) (set island_platform_cube1.Bodies) "Body 1 should be in its own island on the platform"
-                    else
-                        checkIsOnSurface body1Id floorZ "Cube 1"
-                        let island_floor_cube1 = runner.GetIslandRefForBody body1Id
-                        Assert.AreEqual (set [body1Id]) (set island_floor_cube1.Bodies) "Body 1 should be in its own island on the floor"
-
+ 
                     Assert.IsFalse (runner.State.FloraRepo.AllTrees.ContainsKey originalFallenTreeId) "The large tree should have been broken and removed"
                     Assert.IsTrue (runner.State.FloraRepo.AllTrees.ContainsKey smallTreeId) "The small, unbreakable tree should have survived"
                     
                     let allIds = [body1Id; fallenTreeBodyId; body4Id; body5Id; body6Id; body7Id; dominoId; bulldozerId]
                     allIds |> Seq.iter isValidXYCoords
+                    
                     Success $"{loc} COMPLETED"
                 else
                     Assert.Fail $"[{loc}] Unexpected number of sleeping islands: {sleepingIslandCount}. The test requires exactly 6"

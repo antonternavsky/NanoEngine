@@ -1183,8 +1183,8 @@ module Engine =
                 let bushData = r._bushes[bushId]
                 let result =
                     Collision.checkCollisionSAT
-                        bushData.Position
-                        bushData.Dimensions
+                        dynamicBody.Position
+                        dynamicBody.Dimensions
                         dynamicBody.Orientation
                         bushData.Position
                         bushData.Dimensions
@@ -1289,13 +1289,13 @@ module Engine =
                 CollisionDestroyedFlora = HashSet()
                 CollisionProcessedStatic = HashSet()
                 CollisionProcessedFlora = HashSet()
-
                 BodiesToAdd = new PooledList<_>()
                 BodiesToRemoveIds = new PooledList<_>()
                 FloraToRemoveIds = new PooledList<_>()
                 PrismsToRemoveCoords = new PooledList<_>()
             }
 
+    
     [<RequireQualifiedAccess>]
     module SpatialHash =
         
@@ -1438,195 +1438,7 @@ module Engine =
                     oldOccupiedCells |> Dispose.action
                     
                     cachedEntry <- BodyCacheEntry(&body, newOccupiedCells)
-    
-    [<RequireQualifiedAccess>]    
-    module SnapGrid =
-        let private generateLayerPoints (basePos: Vector3) (layerZ: double) (points: PooledList<Vector3>) =
-            let hexCenter = Vector3(basePos.X, basePos.Y, layerZ)
-            points.Add hexCenter
-            let inline calcHexVertex (index: int) =
-                let angle = double index * PI / 3.0
-                hexCenter + Vector3(HEX_RADIUS * cos angle, HEX_RADIUS * sin angle, 0.0)
-            for i = 0 to 5 do
-                let currentVertex = calcHexVertex i
-                let nextVertex = calcHexVertex (i + 1)
-                points.Add currentVertex
-                let triCenter = (hexCenter + currentVertex + nextVertex) / 3.0
-                points.Add(Vector3(triCenter.X, triCenter.Y, layerZ))
-
-        let private getSnapPointsForHex (coords: SubPrismCoords) (buffer: PooledList<Vector3>) =
-            buffer.Clear()
-            let hexBasePos = Grid.convertHexToWorld coords.Q coords.R 0 0.0
-            generateLayerPoints hexBasePos (double coords.Z * HEX_HEIGHT) buffer
-            generateLayerPoints hexBasePos (double coords.Z * HEX_HEIGHT + 0.5 * HEX_HEIGHT) buffer
-
-        let private checkCollisions
-            bodyToSnapId
-            candidatePosition
-            bodyDimensions
-            bodyOrientation
-            bodyRepo
-            spatialHash
-            (occupiedCells: Span<uint64>) =
-            let mutable isFree = true
-            let mutable i = 0
-            while isFree && i < occupiedCells.Length do
-                let cellKey = &occupiedCells[i]
-                for otherId in SpatialHash.query cellKey spatialHash do
-                    if isFree && otherId <> bodyToSnapId then
-                        let otherBody = &Body.getRef otherId bodyRepo
-                        if not <| Unsafe.IsNullRef &otherBody then
-                            let result =
-                                Collision.checkCollisionSAT
-                                    candidatePosition
-                                    bodyDimensions
-                                    bodyOrientation
-                                    otherBody.Position
-                                    otherBody.Dimensions
-                                    otherBody.Orientation
-                            
-                            if result.AreColliding then
-                                isFree <- false
-                i <- i + 1
-            isFree
-            
-        let private isTargetPositionFree
-            bodyToSnapId
-            candidatePosition
-            bodyDimensions
-            bodyOrientation
-            bodyRepo
-            activeHash
-            sleepingHash
-            geometryRepo
-            filterBuffer
-            buffer =
-                Grid.fillOverlappingSubPrismsAABB
-                    candidatePosition
-                    bodyDimensions
-                    bodyOrientation
-                    filterBuffer
-                    buffer
                     
-                let occupiedCells = buffer.Span
-
-                let mutable isFree =
-                    checkCollisions
-                        bodyToSnapId
-                        candidatePosition
-                        bodyDimensions
-                        bodyOrientation
-                        bodyRepo
-                        activeHash
-                        occupiedCells
-                
-                if isFree then
-                    isFree <-
-                        checkCollisions
-                            bodyToSnapId
-                            candidatePosition
-                            bodyDimensions
-                            bodyOrientation
-                            bodyRepo
-                            sleepingHash
-                            occupiedCells
-                if isFree then
-                    let mutable i = 0
-                    while isFree && i < occupiedCells.Length do
-                        let cellKey = &occupiedCells[i]
-                        if geometryRepo |> Geometry.isSolid cellKey then
-                            let struct (staticPos, staticDims, staticOrient) = cellKey |> Grid.getPrismSpaceByKey 
-                            let result =
-                                Collision.checkCollisionSAT
-                                    candidatePosition
-                                    bodyDimensions
-                                    bodyOrientation
-                                    staticPos
-                                    staticDims
-                                    staticOrient
-                                    
-                            if result.AreColliding && result.PenetrationVector.Magnitude() > PENETRATION_SLOP then
-                                isFree <- false
-                        i <- i + 1
-                                
-                isFree
-
-        [<Struct>]
-        type private DistanceComparer =
-            interface IComparer<struct(Vector3 * double)> with
-                member _.Compare(x, y) =
-                    let struct(_, distanceX) = x
-                    let struct(_, distanceY) = y
-                    distanceX.CompareTo distanceY
-            
-        let trySnapToGridCollisionAware
-            (body: byref<Body.T>)
-            bodyRepo
-            activeHash
-            sleepingHash
-            geometryRepo
-            buffers =
-            
-            let offsetFromCenterToBottom = body.Orientation * Vector3(0.0, 0.0, -body.Dimensions.Z / 2.0)
-            let bodyPos = body.Position
-            let bodyHeight = body.Dimensions.Z
-
-            let halfBodyHeightInCells = int (Math.Ceiling((bodyHeight / 2.0) / HEX_HEIGHT))
-            let minZOffset = -halfBodyHeightInCells - 1
-            
-            let struct(rawQ, rawR, rawZ) = bodyPos |> Grid.convertWorldToRawGridCoords
-
-            use allCandidatePoints = new PooledList<struct(Vector3 * double)>()
-            
-            for zOffset = minZOffset to 0 do
-                let searchCoords = SubPrismCoords.Normalize(rawQ, rawR, rawZ + zOffset, 0)
-                getSnapPointsForHex searchCoords buffers.SnapPointsBuffer
-
-                for point in buffers.SnapPointsBuffer.Span do
-                    let wrappedPointX = WorldLimits.wrapX point.X
-                    let wrappedPointY = WorldLimits.wrapY point.Y
-                    let wrappedPoint = Vector3(wrappedPointX, wrappedPointY, point.Z)
-
-                    let deltaX = WorldLimits.relativeX (wrappedPoint.X - bodyPos.X)
-                    let deltaY = WorldLimits.relativeY (wrappedPoint.Y - bodyPos.Y)
-                    let deltaZ = wrappedPoint.Z - bodyPos.Z
-                    
-                    let distSq = deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ
-                    
-                    allCandidatePoints.Add(struct(wrappedPoint, distSq))
-
-            allCandidatePoints.Sort(DistanceComparer())
-            
-            let mutable isFoundSnapPoint = false
-            let mutable i = 0
-            let allCandidatePoints = allCandidatePoints.Span
-            while not isFoundSnapPoint && i < allCandidatePoints.Length do
-                let struct(point, _) = allCandidatePoints[i]
-                
-                if geometryRepo |> Geometry.hasSupportBeneath point then
-                    let candidateBodyCenter = point - offsetFromCenterToBottom
-                    
-                    if isTargetPositionFree
-                        body.Id
-                        candidateBodyCenter
-                        body.Dimensions
-                        body.Orientation
-                        bodyRepo
-                        activeHash
-                        sleepingHash
-                        geometryRepo
-                        buffers.UniquePrismsFilterBuffer
-                        buffers.UniquePrismsBuffer 
-                    then
-                        body.Position <- candidateBodyCenter
-                        body.Velocity <- Vector3.Zero
-                        body.IsSnappedToGrid <- true
-                        isFoundSnapPoint <- true
-
-                i <- i + 1
-
-            isFoundSnapPoint
-
     [<RequireQualifiedAccess>]
     module Island =
         
@@ -1775,7 +1587,7 @@ module Engine =
                     MaxPenetrationThisStep = 0.0
                     MinAABB = Vector3(Double.MaxValue, Double.MaxValue, Double.MaxValue)
                     MaxAABB = Vector3(Double.MinValue, Double.MinValue, Double.MinValue)
-                    OccupiedGridCells = new PooledList<int64>()
+                    OccupiedGridCells = new PooledList<uint64>()
                 }
             val Id: int
             val Bodies: PooledList<int>
@@ -1789,7 +1601,7 @@ module Engine =
             val mutable MaxPenetrationThisStep : double
             val mutable MinAABB: Vector3
             val mutable MaxAABB: Vector3
-            val OccupiedGridCells: PooledList<int64>
+            val OccupiedGridCells: PooledList<uint64>
             
             member inline this.BodiesSpan : ReadOnlySpan<int> = this.Bodies.Span
             member inline this.AddBody bodyId =
@@ -1861,7 +1673,7 @@ module Engine =
         [<RequireQualifiedAccess>]
         module private IslandGridPhase =
             let inline packKey (gridX: int) (gridY: int) =
-                (int64 gridX <<< 32) ||| (int64 gridY &&& 0xFFFFFFFFL)
+                (uint64 gridX <<< 32) ||| (uint64 gridY &&& 0xFFFFFFFFUL)
 
             let inline worldToGridCoord (pos: double) (cellSize: double) =
                 Math.Floor(pos / cellSize) |> int
@@ -1869,9 +1681,8 @@ module Engine =
         type Repo =
             private
                 {
+                    _spatialHash : SpatialHash.Repo
                     _bodyRepo: Body.Repo
-                    _activeHash: SpatialHash.Repo
-                    _sleepingHash: SpatialHash.Repo
                     _mergeRedirects : Dictionary<int, int>
                     _activeIslandIds : HashSet<int>
                     _sleepingIslandIds : HashSet<int>
@@ -1887,7 +1698,7 @@ module Engine =
                     _staticSupportCache: Dictionary<int, bool>
                     _freeIds : List<int>
                     _logger : ILogger
-                    _islandGrid: Dictionary<int64, PooledList<int>>
+                    _islandGrid: Dictionary<uint64, PooledList<int>>
                     _gridCellSize: double
                     mutable _currentId: int
                 }
@@ -1903,13 +1714,11 @@ module Engine =
             interface IDisposable with
                 member this.Dispose() = this.Dispose()
         let getActiveIslandIds r = r._activeIslandIds
-        let getSleepingIslandIds r = r._sleepingIslandIds
-        
-        let createRepo bodyRepo activeHash sleepingHash =
+
+        let createRepo spatialHash bodyRepo =
             {
+                _spatialHash = spatialHash
                 _bodyRepo = bodyRepo
-                _activeHash = activeHash
-                _sleepingHash = sleepingHash
                 _mergeRedirects = Dictionary()
                 _activeIslandIds = HashSet()
                 _sleepingIslandIds = HashSet()
@@ -2055,7 +1864,7 @@ module Engine =
         
         let private hasStaticSupport
             (body: inref<Body.T>)
-            (occupiedCells: ReadOnlySpan<uint64>)
+            spatialHash
             geometryRepo
             r =
             
@@ -2080,6 +1889,8 @@ module Engine =
                     hasFoundSupport <- true
       
                 if not <| hasFoundSupport then
+                    let occupiedCells = SpatialHash.getOccupiedCells body.Id spatialHash
+                    
                     let mutable i = 0
                     while not hasFoundSupport && i < occupiedCells.Length do
                         let cellKey = &occupiedCells[i]
@@ -2104,8 +1915,8 @@ module Engine =
         
         let isGrounded
             bodyRepo
-            activeHash
             geometryRepo
+            spatialHash
             (island: inref<T>)
             r =
             
@@ -2117,15 +1928,13 @@ module Engine =
                 if Unsafe.IsNullRef &body then
                     false
                 else
-                    let occupiedCells = SpatialHash.getOccupiedCells bodyId activeHash
-                    hasStaticSupport &body occupiedCells geometryRepo r
+                    hasStaticSupport &body spatialHash geometryRepo r
             else
                 use anchors = new PooledList<int>()
                 for bodyId in island.BodiesSpan do
                     let body = &Body.getRef bodyId bodyRepo
                     if not <| Unsafe.IsNullRef &body then
-                        let occupiedCells = SpatialHash.getOccupiedCells bodyId activeHash
-                        if hasStaticSupport &body occupiedCells geometryRepo r then
+                        if hasStaticSupport &body spatialHash geometryRepo r then
                             anchors.Add bodyId
 
                 if anchors.Count = 0 then
@@ -2160,7 +1969,7 @@ module Engine =
         let getIslandIdForBody bodyId r = r._bodyToIslandMap[bodyId]
         let getIslandRef islandId r = &CollectionsMarshal.GetValueRefOrNullRef(r._allIslands, islandId)
         
-        let private calculateOccupiedCells (island: inref<T>) (cellSize: double) (buffer: PooledList<int64>) =
+        let private calculateOccupiedCells (island: inref<T>) (cellSize: double) (buffer: PooledList<uint64>) =
             buffer.Clear()
             if island.BodiesSpan.Length > 0 then
                 let minCorner = island.MinAABB
@@ -2198,7 +2007,30 @@ module Engine =
                         processYRange gx
                     for gx = 0 to maxGridX do
                         processYRange gx
-                
+        
+        let queryIslandsByAABB 
+            (minAABB: Vector3) 
+            (maxAABB: Vector3) 
+            (r: Repo)
+            (resultSet: PooledSet<int>)
+            (tempBuffer: PooledList<uint64>) =
+
+            resultSet.Clear()
+            tempBuffer.Clear()
+    
+            use mutable tempIsland = new T(0)
+            tempIsland.MinAABB <- minAABB
+            tempIsland.MaxAABB <- maxAABB
+
+            calculateOccupiedCells &tempIsland r._gridCellSize tempBuffer
+
+            for cellKey in tempBuffer.Span do
+                match r._islandGrid.TryGetValue cellKey with
+                | true, idList ->
+                    for islandId in idList.Span do
+                        resultSet.Add islandId |> ignore
+                | false, _ -> ()
+                            
         let private removeIslandFromGrid (island: inref<T>) r =
             let islandId = island.Id
             for cellKey in island.OccupiedGridCells.Span do
@@ -2398,7 +2230,7 @@ module Engine =
                 r._sleepingIslandIds.Remove removedId |> ignore
             r._removeIslandsBuffer.Clear()
             
-        let processIslandChanges geometryRepo buffers r =
+        let processIslandChanges geometryRepo spatialHash (buffers: Buffers) r =
             
             r._staticSupportCache.Clear()
             r._mergeRedirects.Clear()
@@ -2421,10 +2253,9 @@ module Engine =
                     // island.ContactTTL.Clear()
                     
                     for bodyId in island.BodiesSpan do
-                        r._sleepingHash |> SpatialHash.remove bodyId
                         let body = &Body.getRef bodyId r._bodyRepo
-                        if not <| Unsafe.IsNullRef &body then
-                            SpatialHash.add &body buffers r._activeHash
+                        Body.updateAABB &body
+                        SpatialHash.add &body buffers spatialHash
                         r._staticSupportCache.Remove bodyId |> ignore
                         
                     r._sleepingIslandIds.Remove island.Id |> ignore
@@ -2485,8 +2316,8 @@ module Engine =
                                 newFragmentIsland.IsGrounded <-
                                     isGrounded
                                         r._bodyRepo
-                                        r._activeHash
                                         geometryRepo
+                                        r._spatialHash
                                         &newFragmentIsland
                                         r
                                         
@@ -2495,8 +2326,8 @@ module Engine =
                         originalIsland.IsGrounded <-
                             isGrounded
                                 r._bodyRepo
-                                r._activeHash
                                 geometryRepo
+                                r._spatialHash
                                 &originalIsland
                                 r
                         
@@ -2540,11 +2371,9 @@ module Engine =
                             island.IsAwake <- false
                             island.MaxPenetrationThisStep <- 0.0
                             for bodyId in island.BodiesSpan do
-                                r._activeHash |> SpatialHash.remove bodyId
                                 let body = &Body.getRef bodyId r._bodyRepo
-                                if not <| Unsafe.IsNullRef &body then
-                                    body.Velocity <- Vector3.Zero
-                                    SpatialHash.add &body buffers r._sleepingHash
+                                spatialHash |> SpatialHash.remove bodyId
+                                body.Velocity <- Vector3.Zero
                             
                             recalculateAABBAndUpdateGrid &island r
                             
@@ -2560,6 +2389,163 @@ module Engine =
                     r._removeIslandsBuffer.Add island.Id
                     
             r |> removeIslands
+    
+    [<RequireQualifiedAccess>]    
+    module SnapGrid =
+        let private generateLayerPoints (basePos: Vector3) (layerZ: double) (points: PooledList<Vector3>) =
+            let hexCenter = Vector3(basePos.X, basePos.Y, layerZ)
+            points.Add hexCenter
+            let inline calcHexVertex (index: int) =
+                let angle = double index * PI / 3.0
+                hexCenter + Vector3(HEX_RADIUS * cos angle, HEX_RADIUS * sin angle, 0.0)
+            for i = 0 to 5 do
+                let currentVertex = calcHexVertex i
+                let nextVertex = calcHexVertex (i + 1)
+                points.Add currentVertex
+                let triCenter = (hexCenter + currentVertex + nextVertex) / 3.0
+                points.Add(Vector3(triCenter.X, triCenter.Y, layerZ))
+
+        let private getSnapPointsForHex (coords: SubPrismCoords) (buffer: PooledList<Vector3>) =
+            buffer.Clear()
+            let hexBasePos = Grid.convertHexToWorld coords.Q coords.R 0 0.0
+            generateLayerPoints hexBasePos (double coords.Z * HEX_HEIGHT) buffer
+            generateLayerPoints hexBasePos (double coords.Z * HEX_HEIGHT + 0.5 * HEX_HEIGHT) buffer
+
+        let private isTargetPositionFree
+            bodyToSnapId
+            candidatePosition
+            bodyDimensions
+            bodyOrientation
+            bodyRepo
+            islandRepo
+            geometryRepo
+            (buffers: Buffers) =
+                
+            let mutable isFree = true
+
+            let struct(candidateMinAABB, candidateMaxAABB) =
+                Collision.getAABB candidatePosition bodyDimensions bodyOrientation
+
+            use islandCandidates = new PooledSet<int>()
+
+            Island.queryIslandsByAABB 
+                candidateMinAABB 
+                candidateMaxAABB 
+                islandRepo 
+                islandCandidates
+                buffers.UniquePrismsBuffer
+
+            for islandId in islandCandidates do
+                if isFree then
+                    let otherIsland = &Island.getIslandRef islandId islandRepo
+                    if Collision.checkCollisionAABB candidateMinAABB candidateMaxAABB otherIsland.MinAABB otherIsland.MaxAABB then
+                        for otherId in otherIsland.BodiesSpan do
+                            if isFree && otherId <> bodyToSnapId then
+                                let otherBody = &Body.getRef otherId bodyRepo
+                                let result =
+                                    Collision.checkCollisionSAT
+                                        candidatePosition
+                                        bodyDimensions
+                                        bodyOrientation
+                                        otherBody.Position
+                                        otherBody.Dimensions
+                                        otherBody.Orientation
+                                
+                                if result.AreColliding then
+                                    isFree <- false
+
+            if isFree then
+                Grid.fillOverlappingSubPrismsAABB
+                    candidatePosition
+                    bodyDimensions
+                    bodyOrientation
+                    buffers.UniquePrismsFilterBuffer
+                    buffers.UniquePrismsBuffer
+
+                let occupiedCells = buffers.UniquePrismsBuffer.Span
+                let mutable i = 0
+                while isFree && i < occupiedCells.Length do
+                    let cellKey = &occupiedCells[i]
+                    if geometryRepo |> Geometry.isSolid cellKey then
+                        let struct (staticPos, staticDims, staticOrient) = cellKey |> Grid.getPrismSpaceByKey 
+                        let result =
+                            Collision.checkCollisionSAT
+                                candidatePosition
+                                bodyDimensions
+                                bodyOrientation
+                                staticPos
+                                staticDims
+                                staticOrient
+
+                        if result.AreColliding && result.PenetrationVector.Magnitude() > PENETRATION_SLOP then
+                            isFree <- false
+                    i <- i + 1
+                                    
+            isFree
+
+        [<Struct>]
+        type private VectorDistanceComparer(referencePoint: Vector3) =
+            interface IComparer<Vector3> with
+                member _.Compare(p1, p2) =
+                    let distSq1 = (p1 - referencePoint).MagnitudeSq()
+                    let distSq2 = (p2 - referencePoint).MagnitudeSq()
+                    distSq1.CompareTo(distSq2)
+            
+        let trySnapToGridCollisionAware
+            (body: byref<Body.T>)
+            bodyRepo
+            islandRepo
+            geometryRepo
+            buffers =
+            
+            let offsetFromCenterToBottom = body.Orientation * Vector3(0.0, 0.0, -body.Dimensions.Z / 2.0)
+            let bodyPos = body.Position
+            let bodyHeight = body.Dimensions.Z
+
+            let halfBodyHeightInCells = int (Math.Ceiling((bodyHeight / 2.0) / HEX_HEIGHT))
+            let minZOffset = -halfBodyHeightInCells - 1
+            
+            let struct(rawQ, rawR, rawZ) = bodyPos |> Grid.convertWorldToRawGridCoords
+
+            use supportedCandidates = new PooledList<Vector3>()
+    
+            for zOffset = minZOffset to 0 do
+                let searchCoords = SubPrismCoords.Normalize(rawQ, rawR, rawZ + zOffset, 0)
+                getSnapPointsForHex searchCoords buffers.SnapPointsBuffer
+
+                for point in buffers.SnapPointsBuffer.Span do
+                    if geometryRepo |> Geometry.hasSupportBeneath point then
+                        supportedCandidates.Add point
+
+            if supportedCandidates.Count = 0 then
+                false
+            else
+                supportedCandidates.Span.Sort(VectorDistanceComparer(bodyPos))
+
+                let mutable isFoundSnapPoint = false
+                let mutable i = 0
+                let candidatesSpan = supportedCandidates.Span
+                while not <| isFoundSnapPoint && i < candidatesSpan.Length do
+                    let point = candidatesSpan[i]
+                    i <- i + 1
+                    let candidateBodyCenter = point - offsetFromCenterToBottom
+
+                    if isTargetPositionFree
+                        body.Id
+                        candidateBodyCenter
+                        body.Dimensions
+                        body.Orientation
+                        bodyRepo
+                        islandRepo
+                        geometryRepo
+                        buffers
+                    then
+                        body.Position <- candidateBodyCenter
+                        body.Velocity <- Vector3.Zero
+                        body.IsSnappedToGrid <- true
+                        isFoundSnapPoint <- true
+
+                isFoundSnapPoint
 
     [<RequireQualifiedAccess>]
     module Liquid =
@@ -2632,32 +2618,29 @@ module Engine =
             {
                 _geometryRepo: Geometry.Repo
                 _bodyRepo : Body.Repo
-                _activeHash : SpatialHash.Repo
-                _sleepingHash: SpatialHash.Repo
                 _islandRepo : Island.Repo
                 _liquidRepo : Liquid.Repo
                 _floraRepo : Flora.Repo
                 _buffers : Buffers
+                _spatialHash : SpatialHash.Repo
                 _random : Random
                 _dt : double
             }
         
         member this.Geometry = this._geometryRepo
         member this.Bodies = this._bodyRepo
-        member this.ActiveHash = this._activeHash
-        member this.SleepingHash = this._sleepingHash
         member this.Islands = this._islandRepo
         member this.Liquid = this._liquidRepo
         member this.Flora = this._floraRepo
         member this.Buffers = this._buffers
         
         member this.Dispose() =
-            this._activeHash |> Dispose.action
-            this._sleepingHash |> Dispose.action
             this._islandRepo |> Dispose.action
             this._liquidRepo |> Dispose.action
             this._floraRepo |> Dispose.action
             this._buffers |> Dispose.action
+            this._spatialHash |> Dispose.action
+            
         interface IDisposable with
             member this.Dispose() = this.Dispose()
     let createEngine dt =
@@ -2674,19 +2657,16 @@ module Engine =
 
         let geometryRepo = Geometry.createRepo()
         let bodyRepo = Body.createRepo()
-
-        let activeHash = SpatialHash.createRepo()
-        let sleepingHash = SpatialHash.createRepo()
-
+        let spatialHash = SpatialHash.createRepo()
+        let buffers = Buffers.Create()
         {
             _bodyRepo = bodyRepo
-            _islandRepo = Island.createRepo bodyRepo activeHash sleepingHash
+            _islandRepo = Island.createRepo spatialHash bodyRepo
             _floraRepo = Flora.createRepo geometryRepo
             _geometryRepo = geometryRepo
             _liquidRepo = Liquid.createRepo geometryRepo
-            _activeHash = activeHash
-            _sleepingHash = sleepingHash
-            _buffers = Buffers.Create()
+            _buffers = buffers
+            _spatialHash = spatialHash
             _random = Random(Guid.NewGuid().GetHashCode())
             _dt = dt
         }
@@ -2704,18 +2684,20 @@ module Engine =
             abs(localPoint.Y) <= h.Y + PENETRATION_SLOP  &&
             abs(localPoint.Z) <= h.Z + PENETRATION_SLOP 
 
-        let private checkPartnersInHash
+        let private checkPartnersInIsland
             checkPoint
             bodyRepo
-            checkPointCellKey
             (body: inref<Body.T>)
-            hash =
+            (island: inref<Island.T>) =
                 
             let mutable isFound = false
-            for otherId in SpatialHash.query checkPointCellKey hash do
-                if not <| isFound && otherId <> body.Id then
+            let mutable i = 0
+            while not <| isFound && i < island.BodiesSpan.Length do 
+                let otherId = island.BodiesSpan[i]
+                i <- i + 1
+                if otherId <> body.Id then
                     let otherBody = &Body.getRef otherId bodyRepo
-                    if not <| Unsafe.IsNullRef &otherBody && not <| otherBody.IsFallingOver then
+                    if not <| otherBody.IsFallingOver then
                         if isPointInsideOBB checkPoint otherBody.Position otherBody.Dimensions otherBody.Orientation then
                             isFound <- true
             isFound
@@ -2725,8 +2707,7 @@ module Engine =
             geometryRepo
             bodyRepo
             (body: inref<Body.T>)
-            activeHash
-            sleepingHash =
+            (island: inref<Island.T>) =
 
             let mutable p = p
             WorldLimits.wrapPosition &p
@@ -2734,77 +2715,32 @@ module Engine =
             let checkPos = Vector3(p.X, p.Y, p.Z - PENETRATION_SLOP)
             let key = checkPos |> Grid.convertWorldToSubPrismCoords |> SubPrismKey.pack
 
-            geometryRepo |> Geometry.isSolid key
-            || checkPartnersInHash p bodyRepo key &body activeHash
-            || checkPartnersInHash p bodyRepo key &body sleepingHash
+            geometryRepo |> Geometry.isSolid key || checkPartnersInIsland p bodyRepo &body &island
 
-        let private checkSinglePoint
-            geometryRepo
-            bodyRepo
-            (body: inref<Body.T>)
-            activeHash
-            sleepingHash
-            (point: Vector3) =
-        
-            if point.Z <= PENETRATION_SLOP then
-                true
-            else
-                if checkWorldPosForSupport point geometryRepo bodyRepo &body activeHash sleepingHash then
-                    true
-                else
-                    let radius = HEX_RADIUS * 0.16
-                    if checkWorldPosForSupport (point + Vector3(radius, 0.0, 0.0)) geometryRepo bodyRepo &body activeHash sleepingHash then true
-                    elif checkWorldPosForSupport (point - Vector3(radius, 0.0, 0.0)) geometryRepo bodyRepo &body activeHash sleepingHash then true
-                    elif checkWorldPosForSupport (point + Vector3(0.0, radius, 0.0)) geometryRepo bodyRepo &body activeHash sleepingHash then true
-                    elif checkWorldPosForSupport (point - Vector3(0.0, radius, 0.0)) geometryRepo bodyRepo &body activeHash sleepingHash then true
-                    else false
-        
         let isPointSupported
             geometryRepo
             bodyRepo
             (body: inref<Body.T>)
-            activeHash
-            sleepingHash
+            (island: inref<Island.T>)
             (checkPoint: Vector3) =
-            if checkSinglePoint geometryRepo bodyRepo &body activeHash sleepingHash checkPoint then
+            if checkPoint.Z <= PENETRATION_SLOP then
                 true
             else
-                let bodyHalfExtent = (max body.Dimensions.X body.Dimensions.Y) / 2.0
-                let maxSupporterHalfExtent = MAX_DIMENSION / 2.0
-                let safeMargin = bodyHalfExtent + maxSupporterHalfExtent + PENETRATION_SLOP
-
-                let nearMinX = checkPoint.X < safeMargin
-                let nearMaxX = checkPoint.X > (WorldLimits.X - safeMargin)
-                let nearMinY = checkPoint.Y < safeMargin
-                let nearMaxY = checkPoint.Y > (WorldLimits.Y - safeMargin)
-
-                let mutable foundSupportInGhost = false
-
-                if nearMinX then
-                    foundSupportInGhost <- foundSupportInGhost || checkSinglePoint geometryRepo bodyRepo &body activeHash sleepingHash (checkPoint + Vector3(WorldLimits.X, 0.0, 0.0))
-                if not <| foundSupportInGhost && nearMaxX then
-                    foundSupportInGhost <- foundSupportInGhost || checkSinglePoint geometryRepo bodyRepo &body activeHash sleepingHash (checkPoint - Vector3(WorldLimits.X, 0.0, 0.0))
-                if not <| foundSupportInGhost && nearMinY then
-                    foundSupportInGhost <- foundSupportInGhost || checkSinglePoint geometryRepo bodyRepo &body activeHash sleepingHash (checkPoint + Vector3(0.0, WorldLimits.Y, 0.0))
-                if not <| foundSupportInGhost && nearMaxY then
-                    foundSupportInGhost <- foundSupportInGhost || checkSinglePoint geometryRepo bodyRepo &body activeHash sleepingHash (checkPoint - Vector3(0.0, WorldLimits.Y, 0.0))
-                if not <| foundSupportInGhost && nearMinX && nearMinY then
-                    foundSupportInGhost <- foundSupportInGhost || checkSinglePoint geometryRepo bodyRepo &body activeHash sleepingHash (checkPoint + Vector3(WorldLimits.X, WorldLimits.Y, 0.0))
-                if not <| foundSupportInGhost && nearMaxX && nearMinY then
-                    foundSupportInGhost <- foundSupportInGhost || checkSinglePoint geometryRepo bodyRepo &body activeHash sleepingHash (checkPoint + Vector3(-WorldLimits.X, WorldLimits.Y, 0.0))
-                if not <| foundSupportInGhost && nearMinX && nearMaxY then
-                    foundSupportInGhost <- foundSupportInGhost || checkSinglePoint geometryRepo bodyRepo &body activeHash sleepingHash (checkPoint + Vector3(WorldLimits.X, -WorldLimits.Y, 0.0))
-                if not <| foundSupportInGhost && nearMaxX && nearMaxY then
-                    foundSupportInGhost <- foundSupportInGhost || checkSinglePoint geometryRepo bodyRepo &body activeHash sleepingHash (checkPoint + Vector3(-WorldLimits.X, -WorldLimits.Y, 0.0))
-
-                foundSupportInGhost
+                if checkWorldPosForSupport checkPoint geometryRepo bodyRepo &body &island then
+                    true
+                else
+                    let radius = HEX_RADIUS * 0.4
+                    if checkWorldPosForSupport (checkPoint + Vector3(radius, 0.0, 0.0)) geometryRepo bodyRepo &body &island then true
+                    elif checkWorldPosForSupport (checkPoint - Vector3(radius, 0.0, 0.0)) geometryRepo bodyRepo &body &island then true
+                    elif checkWorldPosForSupport (checkPoint + Vector3(0.0, radius, 0.0)) geometryRepo bodyRepo &body &island then true
+                    elif checkWorldPosForSupport (checkPoint - Vector3(0.0, radius, 0.0)) geometryRepo bodyRepo &body &island then true
+                    else false
         
         let private tryInitiateFall
             (body: inref<Body.T>)
              geometryRepo
              bodyRepo
-             activeHash
-             sleepingHash =
+             islandRepo=
             if body.IsFallingOver || body.InvMass < EPSILON then
                 ValueNone
             else
@@ -2812,7 +2748,9 @@ module Engine =
                 let bottomCenterOffset = body.Orientation * Vector3(0.0, 0.0, -h.Z)
                 let mutable projectedCenterOfMass = body.Position + bottomCenterOffset
                 WorldLimits.wrapPosition &projectedCenterOfMass
-                let isCenterOfMassSupported = isPointSupported geometryRepo bodyRepo &body activeHash sleepingHash projectedCenterOfMass
+                let islandId = islandRepo |> Island.getIslandIdForBody body.Id
+                let island = &Island.getIslandRef islandId islandRepo
+                let isCenterOfMassSupported = isPointSupported geometryRepo bodyRepo &body &island projectedCenterOfMass
                 if isCenterOfMassSupported then
                     ValueNone
                 else
@@ -2844,64 +2782,6 @@ module Engine =
                     let rotationAxis = Vector3.Cross(fallDirection, Vector3.Up)
                     let finalAxis = if rotationAxis.MagnitudeSq() < EPSILON then Vector3.UnitX else rotationAxis.Normalize()
                     ValueSome(struct(pivotPoint, finalAxis))
-
-        let private updateSpatialHashIncrementally
-            bodyId
-            (newlyOccupiedCells: PooledList<int64>)
-            (bodyGridOccupationCache: Dictionary<int, PooledList<int64>>)
-            (spatialHash: Dictionary<int64, PooledList<int>>)
-            =
-            match bodyGridOccupationCache.TryGetValue bodyId with
-            | false, _ -> 
-                for newCell in newlyOccupiedCells.Span do
-                    match spatialHash.TryGetValue newCell with
-                    | true, idList -> idList.Add bodyId
-                    | false, _ ->
-                        let newList = new PooledList<int>()
-                        newList.Add bodyId
-                        spatialHash.Add(newCell, newList)
-                bodyGridOccupationCache.Add(bodyId, newlyOccupiedCells)
-            | true, oldOccupiedCells -> 
-                use newCellsSet = new PooledSet<int64>(newlyOccupiedCells.Span)
-                for oldCell in oldOccupiedCells.Span do
-                    if not <| newCellsSet.Remove oldCell then
-                        match spatialHash.TryGetValue oldCell with
-                        | true, idList ->
-                            idList |> Utils.removeBySwapBack bodyId |> ignore
-                            if idList.Count = 0 then
-                                spatialHash.Remove oldCell |> ignore
-                                idList |> Dispose.action
-                        | false, _ -> ()
-
-                for newCell in newCellsSet do
-                    match spatialHash.TryGetValue newCell with
-                    | true, idList -> idList.Add bodyId
-                    | false, _ ->
-                        let newList = new PooledList<int>()
-                        newList.Add bodyId
-                        spatialHash.Add(newCell, newList)
-                
-                oldOccupiedCells |> Dispose.action
-                bodyGridOccupationCache[bodyId] <- newlyOccupiedCells
-        
-        let private removeBodyFromSpatialCache
-            (bodyId: int)
-            (bodyGridOccupationCache: Dictionary<int, PooledList<int64>>)
-            (spatialHash: Dictionary<int64, PooledList<int>>)
-            =
-            match bodyGridOccupationCache.TryGetValue bodyId with
-            | true, occupiedCells ->
-                for cell in occupiedCells.Span do
-                    match spatialHash.TryGetValue cell with
-                    | true, idList ->
-                        idList |> Utils.removeBySwapBack bodyId |> ignore
-                        if idList.Count = 0 then
-                            spatialHash.Remove cell |> ignore
-                            idList |> Dispose.action
-                    | false, _ -> ()
-                occupiedCells |> Dispose.action
-                bodyGridOccupationCache.Remove bodyId |> ignore
-            | false, _ -> ()
 
         let inline private getStableFrictionNormal (normal: Vector3) (b1: inref<Body.T>) (b2: inref<Body.T>) =
             if abs(Vector3.Dot(b1.Orientation.R2, b2.Orientation.R2)) > 0.98 && abs(normal.Z) > 0.9 then
@@ -3136,9 +3016,7 @@ module Engine =
             let bodyRepo = engine._bodyRepo
             let buffers = engine._buffers
             let geometryRepo = engine._geometryRepo
-            let activeHash = engine._activeHash
-            let sleepingHash = engine._sleepingHash
-            
+
             use bodiesToInitiateFall = new PooledList<int>()
             let activeIslands = islandRepo |> Island.getActiveIslandIds
             for islandId in activeIslands do
@@ -3163,7 +3041,7 @@ module Engine =
                 let island = &Island.getIslandRef islandId islandRepo
                 for id in island.BodiesSpan do
                     let body = &Body.getRef id bodyRepo
-                    if not <| Unsafe.IsNullRef &body && body.IsFallingOver then                
+                    if body.IsFallingOver then                
                         let previousPosition = body.Position
                         body.FallRotationProgress <- min (body.FallRotationProgress + sub_dt / body.FallDuration) 1.0
 
@@ -3229,11 +3107,8 @@ module Engine =
                                         penetrationVector <- result.PenetrationVector
                             cellIdx <- cellIdx + 1
 
-                        for cellKey in buffers.UniquePrismsBuffer.Span do
-                            for otherId in SpatialHash.query cellKey activeHash do
-                                handleDynamicBody bodyRepo &body otherId islandRepo
-                            for otherId in SpatialHash.query cellKey sleepingHash do
-                                handleDynamicBody bodyRepo &body otherId islandRepo
+                        for otherId in island.BodiesSpan do
+                            handleDynamicBody bodyRepo &body otherId islandRepo
 
                         let animationFinished = body.FallRotationProgress >= (1.0 - EPSILON)
                         let shouldFinalize = hasStoppedOnStatic || animationFinished
@@ -3270,33 +3145,8 @@ module Engine =
                                 let surfaceZ = body.FallPivotPoint.Z
                                 finalPosition <- Vector3(body.Position.X, body.Position.Y, surfaceZ + h.Z)
 
-                            Grid.fillOverlappingSubPrismsAABB
-                                finalPosition
-                                finalDimensions
-                                finalOrientation
-                                buffers.UniquePrismsFilterBuffer
-                                buffers.UniquePrismsBuffer
-
-                            for cellKey in buffers.UniquePrismsBuffer.Span do
-                                for otherId in SpatialHash.query cellKey activeHash do
-                                    processCollidingBody
-                                        bodyRepo
-                                        &body
-                                        islandRepo
-                                        finalPosition
-                                        finalDimensions
-                                        finalOrientation
-                                        otherId
-
-                                for otherId in SpatialHash.query cellKey sleepingHash do
-                                    processCollidingBody
-                                        bodyRepo
-                                        &body
-                                        islandRepo
-                                        finalPosition
-                                        finalDimensions
-                                        finalOrientation
-                                        otherId
+                            for otherId in island.BodiesSpan do
+                                processCollidingBody bodyRepo &body islandRepo finalPosition finalDimensions finalOrientation otherId
 
                             body.IsFallingOver <- false
                             body.FallRotationProgress <- 1.0
@@ -3609,92 +3459,73 @@ module Engine =
             let islandRepo = engine._islandRepo
             let bodyRepo = engine._bodyRepo
             let geometryRepo = engine._geometryRepo
-            let activeHash = engine._activeHash
-            let sleepingHash = engine._sleepingHash
             let floraRepo = engine._floraRepo
+            let spatialHash = engine._spatialHash
             let rnd = engine._random
 
-            let checkedBodyPairs = buffers.CollisionCheckedBodyPairs   
-            let processedStatic = buffers.CollisionProcessedStatic
-            let processedFlora = buffers.CollisionProcessedFlora
+            let checkedBodyPairs = buffers.CollisionCheckedBodyPairs
             let destroyedFlora = buffers.CollisionDestroyedFlora
-
             checkedBodyPairs.Clear()
             destroyedFlora.Clear()
 
-            for activeId1 in islandRepo |> Island.getActiveIslandIds do
-                let activeIsland1 = &Island.getIslandRef activeId1 islandRepo
-                for id1 in activeIsland1.BodiesSpan do
+            for islandId in islandRepo |> Island.getActiveIslandIds do
+                let island = &Island.getIslandRef islandId islandRepo
+                let bodiesInIsland = island.BodiesSpan
+                for i = 0 to bodiesInIsland.Length - 1 do
+                    let id1 = bodiesInIsland[i]
                     let b1 = &Body.getRef id1 bodyRepo
-                    let invMass1 = if b1.IsFallingOver then 0.0 else b1.InvMass
-                    resolveFloorAndCeilingCollisions &b1 invMass1 islandRepo sub_dt
 
-                    let occupiedCells = SpatialHash.getOccupiedCells id1 activeHash
+                    let invMass = if b1.IsFallingOver then 0.0 else b1.InvMass
+                    resolveFloorAndCeilingCollisions &b1 invMass islandRepo sub_dt
 
+                    let occupiedCells = SpatialHash.getOccupiedCells id1 spatialHash
+                    
+                    let processedStatic = buffers.CollisionProcessedStatic
+                    let processedFlora = buffers.CollisionProcessedFlora
                     processedStatic.Clear()
                     processedFlora.Clear()
-        
+
                     for cellKey in occupiedCells do
-                        // Dynamic <-> Dynamic
-                        for id2 in SpatialHash.query cellKey activeHash do
-                            if id1 < id2 then
-                                let activeIsland2 = &Island.getIslandRefForBody id2 islandRepo
-                                if activeIsland1.Id = activeIsland2.Id then
-                                    let contactKey = ContactKey.key id1 id2
-                                    if checkedBodyPairs.Add contactKey then
-                                        let b2 = &Body.getRef id2 bodyRepo
-                                        resolveDynamicDynamicCollision &b1 &b2 islandRepo sub_dt
-                        
-                        // Dynamic <-> Static
                         if geometryRepo |> Geometry.isSolid cellKey then
                             if processedStatic.Add cellKey then
                                 resolveStaticGeometryCollision &b1 cellKey islandRepo sub_dt
-                                
-                        // Dynamic <-> Flora
+
                         match floraRepo |> Flora.tryGetTreesInCell cellKey with
                         | true, treeIds ->
                             for treeId in treeIds.Span do
                                 if not <| destroyedFlora.Contains treeId && processedFlora.Add treeId then
-                                    resolveFloraCollision &b1 treeId floraRepo &activeIsland1 buffers rnd sub_dt
+                                    resolveFloraCollision &b1 treeId floraRepo &island buffers rnd sub_dt
                         | _ -> ()
+                    
+                    for j = i + 1 to bodiesInIsland.Length - 1 do
+                        let id2 = bodiesInIsland[j]
+                        let b2 = &Body.getRef id2 bodyRepo
+                        resolveDynamicDynamicCollision &b1 &b2 islandRepo sub_dt
                         
             for pairKey in collidingIslandPairs do
-                let struct(id1, id2) = ContactKey.unpack pairKey
-                
-                let mutable island1 = &Island.getIslandRef id1 islandRepo
-                let mutable island2 = &Island.getIslandRef id2 islandRepo
+                let struct(islandId1, islandId2) = ContactKey.unpack pairKey            
+                let mutable island1 = &Island.getIslandRef islandId1 islandRepo
+                let mutable island2 = &Island.getIslandRef islandId2 islandRepo
 
-                // We determine which pair: active-active or active-sleeping
-                let activeIsland = if island1.IsAwake then &island1 else &island2
-                let otherIsland = if island1.IsAwake then &island2 else &island1
-
-                // We go through all the bodies of the active island from the pair
-                for bodyId1 in activeIsland.BodiesSpan do
-                    let b1 = &Body.getRef bodyId1 bodyRepo
-                    let occupiedCells = SpatialHash.getOccupiedCells bodyId1 activeHash
-                    for cellKey in occupiedCells do
-                        // We are looking for bodies from the second island (maybe active or sleeping)
-                        
-                        let otherHash = if otherIsland.IsAwake then activeHash else sleepingHash
-                        for bodyId2 in SpatialHash.query cellKey otherHash do
-                            // We make sure that the body belongs to the second island in the pair
-                            if otherIsland.BodiesSpan.Contains bodyId2 then
-                                let contactKey = ContactKey.key bodyId1 bodyId2
-                                if checkedBodyPairs.Add contactKey then
-                                    let b2 = &Body.getRef bodyId2 bodyRepo
-                                    if otherIsland.IsAwake then
-                                        resolveDynamicDynamicCollision &b1 &b2 islandRepo sub_dt
-                                    else
-                                        resolveDynamicSleepingCollision &b1 &b2 islandRepo sub_dt
+                for bodyId1 in island1.BodiesSpan do
+                    for bodyId2 in island2.BodiesSpan do                       
+                        let contactKey = ContactKey.key bodyId1 bodyId2
+                        if checkedBodyPairs.Add contactKey then
+                            let b1 = &Body.getRef bodyId1 bodyRepo
+                            let b2 = &Body.getRef bodyId2 bodyRepo
+                            
+                            if island2.IsAwake then
+                                resolveDynamicDynamicCollision &b1 &b2 islandRepo sub_dt
+                            else
+                                resolveDynamicSleepingCollision &b1 &b2 islandRepo sub_dt
                         
         let private postProcessAndUpdateSleepState engine =
             let islandRepo = engine._islandRepo
             let bodyRepo = engine._bodyRepo
             let floraRepo = engine._floraRepo
-            let activeHash = engine._activeHash
-            let sleepingHash = engine._sleepingHash
-            let dt = engine._dt
             let geometryRepo = engine._geometryRepo
+            let spatialHash = engine._spatialHash
+            let dt = engine._dt
             use processedBushes = new PooledSet<int>()
             
             for islandId in islandRepo |> Island.getActiveIslandIds do
@@ -3708,21 +3539,21 @@ module Engine =
                         let bodyId = island.BodiesSpan[i]
                         i <- i + 1
                         let body = &Body.getRef bodyId bodyRepo
-                        if not <| Unsafe.IsNullRef &body then
-                            processedBushes.Clear()
-                            for pCoords in SpatialHash.getOccupiedCells bodyId activeHash do
-                                match floraRepo |> Flora.tryGetBushesInCell pCoords with
-                                | true, bushIds ->
-                                    for bushId in bushIds.Span do
-                                        processedBushes.Add bushId |> ignore
-                                | _ -> ()
-
-                            for bushId in processedBushes do
-                                Flora.applyBushFriction &body bushId dt floraRepo
-                                
-                            let mSq = body.Velocity.MagnitudeSq()
-                            if (mSq >= SLEEP_VELOCITY_THRESHOLD_SQ || body.IsFallingOver) then
-                                isStillSlow <- false
+                        processedBushes.Clear()
+                        let occupiedCells = SpatialHash.getOccupiedCells bodyId spatialHash
+                        for pCoords in occupiedCells do
+                            match floraRepo |> Flora.tryGetBushesInCell pCoords with
+                            | true, bushIds ->
+                                for bushId in bushIds.Span do
+                                    processedBushes.Add bushId |> ignore
+                            | _ -> ()
+                    
+                        for bushId in processedBushes do
+                            Flora.applyBushFriction &body bushId dt floraRepo
+                            
+                        let mSq = body.Velocity.MagnitudeSq()
+                        if (mSq >= SLEEP_VELOCITY_THRESHOLD_SQ || body.IsFallingOver) then
+                            isStillSlow <- false
                     
                     island.IsSlow <- isStillSlow
                     
@@ -3740,7 +3571,7 @@ module Engine =
                                     i <- i + 1
                                     let body = &Body.getRef bodyId bodyRepo
                                     if not <| Unsafe.IsNullRef &body then
-                                        match tryInitiateFall &body geometryRepo bodyRepo activeHash sleepingHash with
+                                        match tryInitiateFall &body geometryRepo bodyRepo islandRepo with
                                         | ValueSome (struct (pivot, axis)) ->                                          
                                             isIslandStable <- false
                                             body.IsSnappedToGrid <- false
@@ -3778,9 +3609,7 @@ module Engine =
                                 if isIslandStable then
                                     for bodyId in island.BodiesSpan do
                                         let body = &Body.getRef bodyId bodyRepo
-                                        if not <| Unsafe.IsNullRef &body then
-                                            Body.updateAABB &body
-                                            body.Velocity <- Vector3.Zero
+                                        body.Velocity <- Vector3.Zero
                                     Island.requestSleep &island islandRepo
                                 else 
                                     island.FramesResting <- 0
@@ -3798,8 +3627,7 @@ module Engine =
             let floraRepo = engine._floraRepo
             let bodyRepo = engine._bodyRepo
             let islandRepo = engine._islandRepo
-            let activeHash = engine._activeHash
-            let sleepingHash = engine._sleepingHash
+            let spatialHash = engine._spatialHash
             
             for coords in buffers.PrismsToRemoveCoords.Span do
                 geometryRepo |> Geometry.removePrism coords |> ignore
@@ -3814,41 +3642,36 @@ module Engine =
             for id in buffers.BodiesToRemoveIds.Span do
                 bodyRepo |> Body.remove id |> ignore
                 islandRepo |> Island.removeBody id
-                activeHash |> SpatialHash.remove id
-                sleepingHash |> SpatialHash.remove id
+                spatialHash |> SpatialHash.remove id
 
-            for body in buffers.BodiesToAdd.Span do
+            for i = 0 to buffers.BodiesToAdd.Span.Length - 1 do
+                let body = &buffers.BodiesToAdd.Span[i]
                 Body.tryAdd &body bodyRepo |> ignore
                 islandRepo |> Island.addBody body.Id
-
+                
         let step engine =
 
             engine |> applyDeferredChanges
 
-            engine._islandRepo |> Island.processIslandChanges engine._geometryRepo engine._buffers
+            engine._islandRepo |> Island.processIslandChanges engine._geometryRepo engine._spatialHash engine._buffers
+                        
+            let buffers = engine._buffers
+            buffers.Clear()
             
-            engine._buffers.Clear()
-
             for islandId in engine._islandRepo.ActiveIslandIds do
                 let mutable island = &Island.getIslandRef islandId engine._islandRepo
                 island.NextStep() 
                 for bodyId in island.BodiesSpan do
                     let body = &Body.getRef bodyId engine._bodyRepo
-                    if not <| Unsafe.IsNullRef &body then
-                        Body.updateAABB &body
-                        SpatialHash.update &body engine._buffers engine._activeHash
-                        if not <| body.IsFallingOver && not <| body.IsSnappedToGrid && body.IsGravityEnabled then
-                            body.Velocity <- body.Velocity + GRAVITY * engine._dt
-
+                    Body.updateAABB &body
+                    SpatialHash.update &body buffers engine._spatialHash
+                    
+                    if not <| body.IsFallingOver && not <| body.IsSnappedToGrid && body.IsGravityEnabled then
+                        body.Velocity <- body.Velocity + GRAVITY * engine._dt
+                                            
                 Island.recalculateAABBAndUpdateGrid &island engine.Islands
-            
-            for body in engine._buffers.BodiesToAdd.Span do
-                 let foundBody = &Body.getRef body.Id engine._bodyRepo
-                 if not <| Unsafe.IsNullRef &foundBody then
-                    Body.updateAABB &foundBody
-                    SpatialHash.add &foundBody engine._buffers engine._activeHash
 
-            let collidingIslandPairs = engine._islandRepo |> Island.detectBroadPhaseIslandPairs engine._buffers
+            let collidingIslandPairs = engine._islandRepo |> Island.detectBroadPhaseIslandPairs buffers
             
             let resolutionPasses = 8
             let sub_dt = engine._dt / double resolutionPasses
@@ -3870,18 +3693,18 @@ module Engine =
                             body.Position <- body.Position + body.Velocity * sub_dt
                             WorldLimits.wrapPosition &body.Position
                 
-            engine._floraRepo |> Flora.updatePhysics engine._buffers.UnrootedFlora  engine._buffers.FloraToRemoveIds
-            engine._geometryRepo |> Geometry.updatePhysics engine._buffers.FallingPrisms engine._buffers.PrismsToRemoveCoords
+            engine._floraRepo |> Flora.updatePhysics buffers.UnrootedFlora buffers.FloraToRemoveIds
+            engine._geometryRepo |> Geometry.updatePhysics buffers.FallingPrisms buffers.PrismsToRemoveCoords
             engine._liquidRepo |> Liquid.updatePhysics
 
-            for data in engine._buffers.UnrootedFlora.Span do
-                if not <| engine._buffers.BodiesToAdd.Exists(fun b -> b.Id = data.Id) then
+            for data in buffers.UnrootedFlora.Span do
+                if not <| buffers.BodiesToAdd.Exists(fun b -> b.Id = data.Id) then
                      let mutable newBody = Flora.createBodyFromFlora data.Id data
                      newBody.IsForceFalling <- true
                      engine._buffers.BodiesToAdd.Add newBody
                      
-            for fallingPrism in engine._buffers.FallingPrisms.Span do
-                if not <| engine._buffers.BodiesToAdd.Exists(fun b -> b.Id = fallingPrism.Id) then
-                    engine._buffers.BodiesToAdd.Add fallingPrism
+            for fallingPrism in buffers.FallingPrisms.Span do
+                if not <| buffers.BodiesToAdd.Exists(fun b -> b.Id = fallingPrism.Id) then
+                    buffers.BodiesToAdd.Add fallingPrism
 
             engine |> postProcessAndUpdateSleepState
