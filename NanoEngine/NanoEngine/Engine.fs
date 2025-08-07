@@ -264,21 +264,16 @@ module Engine =
             let id2 = int (key &&& 0xFFFFFFFFL)
             struct(id1, id2)
 
-    [<Struct; IsReadOnly; StructLayout(LayoutKind.Explicit, Size = 24)>]
+    [<Struct; IsReadOnly; StructLayout(LayoutKind.Sequential)>]
     type CollisionResult =
-        new(p) = { PenetrationVector = p }
-        member inline this.AreColliding = this.PenetrationVector <> Vector3.Zero
-        member inline this.Normalize() = 
-            let originalPenetrationVector = this.PenetrationVector
-            if originalPenetrationVector.MagnitudeSq() < EPSILON_X2 then
-                struct(Vector3.Zero, 0.0)
-            else
-                let penetrationDepth = originalPenetrationVector.Magnitude()
-                let finalNormal = originalPenetrationVector / penetrationDepth
-                struct(finalNormal, penetrationDepth)
+        new(n: Vector3, d: double, areColliding: bool) = { Normal = n; Depth = d; AreColliding = areColliding }
+
+        static member inline Create(normal, depth) = CollisionResult(normal, depth, true)
+        static member inline NoCollision = CollisionResult(Vector3.Zero, 0.0, false)
         
-        [<FieldOffset(0)>]
-        val PenetrationVector: Vector3
+        val AreColliding: bool
+        val Normal: Vector3
+        val Depth: double
 
     [<RequireQualifiedAccess>]
     module WorldLimits =
@@ -319,31 +314,46 @@ module Engine =
     [<RequireQualifiedAccess>]
     module Collision =
 
+        let inline getProjectedRadiusZ (dimensions: Vector3) (orientation: Matrix3x3) =
+            (dimensions.X / 2.0) * (abs orientation.R0.Z) +
+            (dimensions.Y / 2.0) * (abs orientation.R1.Z) +
+            (dimensions.Z / 2.0) * (abs orientation.R2.Z)
+    
         let getAABB (position: Vector3) (dimensions: Vector3) (orientation: Matrix3x3) =
             
             let h = dimensions / 2.0
-            let corners : Span<Vector3> = Stack.alloc 8
-            corners[0] <- Vector3(-h.X, -h.Y, -h.Z)
-            corners[1] <- Vector3(h.X, -h.Y, -h.Z)
-            corners[2] <- Vector3(h.X, h.Y, -h.Z)
-            corners[3] <- Vector3(-h.X, h.Y, -h.Z)
-            corners[4] <- Vector3(-h.X, -h.Y, h.Z)
-            corners[5] <- Vector3(h.X, -h.Y, h.Z)
-            corners[6] <- Vector3(h.X, h.Y, h.Z)
-            corners[7] <- Vector3(-h.X, h.Y, h.Z)
 
-            let firstWorldCorner = position + orientation * corners[0]
-            let mutable minCorner = firstWorldCorner
-            let mutable maxCorner = firstWorldCorner
+            let m11 = abs orientation.R0.X
+            let m12 = abs orientation.R1.X
+            let m13 = abs orientation.R2.X
+            let m21 = abs orientation.R0.Y
+            let m22 = abs orientation.R1.Y
+            let m23 = abs orientation.R2.Y
+            let m31 = abs orientation.R0.Z
+            let m32 = abs orientation.R1.Z
+            let m33 = abs orientation.R2.Z
+            
+            let hX = h.X
+            let hY = h.Y
+            let hZ = h.Z
 
-            for i = 1 to 7 do
-                let worldCorner = position + orientation * corners[i]
-                minCorner.X <- min minCorner.X worldCorner.X
-                minCorner.Y <- min minCorner.Y worldCorner.Y
-                minCorner.Z <- min minCorner.Z worldCorner.Z
-                maxCorner.X <- max maxCorner.X worldCorner.X
-                maxCorner.Y <- max maxCorner.Y worldCorner.Y
-                maxCorner.Z <- max maxCorner.Z worldCorner.Z
+            let radiusX = hX * m11 + hY * m12 + hZ * m13
+            let radiusY = hX * m21 + hY * m22 + hZ * m23
+            let radiusZ = hX * m31 + hY * m32 + hZ * m33
+
+            let minCorner =
+                Vector3(
+                    position.X - radiusX,
+                    position.Y - radiusY,
+                    position.Z - radiusZ
+                )
+                
+            let maxCorner =
+                Vector3(
+                    position.X + radiusX,
+                    position.Y + radiusY,
+                    position.Z + radiusZ
+                )
             
             struct(minCorner, maxCorner)
         
@@ -415,14 +425,14 @@ module Engine =
             let inline testAxis (axis: Vector3) (axisIndex: int) =
                 if axis.MagnitudeSq() > EPSILON then
                     let radius1 =
-                        abs (Vector3.Dot(o1.R0 * h1.X, axis))
-                        + abs (Vector3.Dot(o1.R1 * h1.Y, axis))
-                        + abs (Vector3.Dot(o1.R2 * h1.Z, axis))
-            
+                        abs (Vector3.Dot(o1.R0, axis)) * h1.X
+                        + abs (Vector3.Dot(o1.R1, axis)) * h1.Y
+                        + abs (Vector3.Dot(o1.R2, axis)) * h1.Z
+
                     let radius2 =
-                        abs (Vector3.Dot(o2.R0 * h2.X, axis))
-                        + abs (Vector3.Dot(o2.R1 * h2.Y, axis))
-                        + abs (Vector3.Dot(o2.R2 * h2.Z, axis))
+                        abs (Vector3.Dot(o2.R0, axis)) * h2.X
+                        + abs (Vector3.Dot(o2.R1, axis)) * h2.Y
+                        + abs (Vector3.Dot(o2.R2, axis)) * h2.Z
 
                     let p1CenterProj = Vector3.Dot(delta, axis)
 
@@ -447,7 +457,7 @@ module Engine =
                 testAxis cachedAxis cachedAxisIndex
 
             if not <| colliding then
-                struct(CollisionResult(Vector3.Zero), cachedAxisIndex)
+                struct(CollisionResult.NoCollision, cachedAxisIndex)
             else
                 testAxis o1.R0 0
                 
@@ -473,16 +483,14 @@ module Engine =
                     testCrossProduct o1.R2 o2.R1 13
                     testCrossProduct o1.R2 o2.R2 14
 
-                if colliding then
                     let mutable normal = mtvAxis.Normalize()
-
                     if Vector3.Dot(normal, delta) < 0.0 then
                         normal <- -normal
-                        
-                    let penetrationVector = normal * minPenetration
-                    struct(CollisionResult(penetrationVector), winningAxisIndex)
+                    let result = CollisionResult.Create(normal, minPenetration)
+                    
+                    struct(result, winningAxisIndex)
                 else
-                    struct(CollisionResult(Vector3.Zero), winningAxisIndex)
+                    struct(CollisionResult.NoCollision, winningAxisIndex)
                     
         let inline checkCollisionSAT (p1: Vector3) (d1: Vector3) (o1: Matrix3x3) (p2: Vector3) (d2: Vector3) (o2: Matrix3x3) =
             let struct(result, _) = checkCollisionSATWithCachedAxis p1 d1 o1 p2 d2 o2 -1
@@ -1882,16 +1890,8 @@ module Engine =
             | false, _ ->
                 
                 let mutable hasFoundSupport = false
-
-                let h = body.Dimensions / 2.0
-                let mutable lowestPointZ = Double.MaxValue
-                for i = 0 to 7 do
-                    let signX = if (i &&& 1) = 0 then -1.0 else 1.0
-                    let signY = if (i &&& 2) = 0 then -1.0 else 1.0
-                    let signZ = if (i &&& 4) = 0 then -1.0 else 1.0
-                    let localCorner = Vector3(h.X * signX, h.Y * signY, h.Z * signZ)
-                    let worldCorner = body.Position + body.Orientation * localCorner
-                    lowestPointZ <- min lowestPointZ worldCorner.Z
+                let radiusZ = Collision.getProjectedRadiusZ body.Dimensions body.Orientation
+                let lowestPointZ = body.Position.Z - radiusZ
                 
                 if lowestPointZ < PENETRATION_SLOP then
                     hasFoundSupport <- true
@@ -2526,7 +2526,7 @@ module Engine =
                                 staticDims
                                 staticOrient
 
-                        if result.AreColliding && result.PenetrationVector.Magnitude() > PENETRATION_SLOP then
+                        if result.AreColliding && result.Depth > PENETRATION_SLOP then
                             isFree <- false
                     i <- i + 1
                                     
@@ -2855,8 +2855,8 @@ module Engine =
             if totalInvMass <= EPSILON then
                 0.0
             else
-
-                let struct(finalNormal, penetrationDepth) = result.Normalize() 
+                let finalNormal = result.Normal
+                let penetrationDepth = result.Depth
 
                 let relativeVelocity = b1.Velocity - b2.Velocity
                 let velAlongNormal = Vector3.Dot(relativeVelocity, finalNormal)
@@ -2936,7 +2936,8 @@ module Engine =
             if b1.IsFallingOver then
                 0.0
             else
-                let struct(finalNormal, penetrationDepth) = result.Normalize()
+                let finalNormal = result.Normal
+                let penetrationDepth = result.Depth
                 let velAlongNormal = Vector3.Dot(b1.Velocity, finalNormal)
                 let mutable totalImpulseScalar = 0.0
 
@@ -3105,16 +3106,9 @@ module Engine =
                         WorldLimits.wrapPosition &idealNewPosition
                         body.Position <- idealNewPosition
 
-                        let h = body.Dimensions / 2.0
-                        let mutable lowestPointZ = Double.MaxValue
-                        for i = 0 to 7 do
-                            let signX = if (i &&& 1) = 0 then -1.0 else 1.0
-                            let signY = if (i &&& 2) = 0 then -1.0 else 1.0
-                            let signZ = if (i &&& 4) = 0 then -1.0 else 1.0
-                            let localCorner = Vector3(h.X * signX, h.Y * signY, h.Z * signZ)
-                            let worldCorner = body.Position + body.Orientation * localCorner
-                            lowestPointZ <- min lowestPointZ worldCorner.Z
-                        
+                        let radiusZ = Collision.getProjectedRadiusZ body.Dimensions body.Orientation
+                        let lowestPointZ = body.Position.Z - radiusZ
+
                         let pivotZ = body.FallPivotPoint.Z
                         if lowestPointZ < pivotZ then
                             let correctionZ = pivotZ - lowestPointZ
@@ -3152,11 +3146,10 @@ module Engine =
                                         staticDims
                                         staticOrient
                                         
-                                if result.AreColliding then
-                                    let struct(_, penetrationDepth) = result.Normalize()
-                                    if penetrationDepth > PENETRATION_SLOP then
-                                        hasStoppedOnStatic <- true
-                                        penetrationVector <- result.PenetrationVector
+                                if result.AreColliding && result.Depth > PENETRATION_SLOP then
+                                    hasStoppedOnStatic <- true
+                                    penetrationVector <- result.Normal * result.Depth
+                                    
                             cellIdx <- cellIdx + 1
 
                         for otherId in island.BodiesSpan do
@@ -3234,65 +3227,58 @@ module Engine =
                     false
                 else
                     axisProximity minA.Y maxA.Y minB.Y maxB.Y WorldLimits.Y
+        
+        let private getRadiusZ (b: inref<Body.T>) (radiusZ: byref<double>) =
+            if radiusZ < 0.0 then
+                radiusZ <- Collision.getProjectedRadiusZ b.Dimensions b.Orientation
+            
+            radiusZ
                         
         let private resolveFloorAndCeilingCollisions (b1: byref<Body.T>) invMass1 islandRepo dt =
             if invMass1 > EPSILON then
-                let h = b1.Dimensions / 2.0
-                
-                // Проверка столкновения с полом
-                let mutable lowestPointZ = Double.MaxValue
-                let worldAABB_minZ = b1.Position.Z - b1.Dimensions.Z * 0.5
-                
-                if worldAABB_minZ < PENETRATION_SLOP then
-                    for i = 0 to 7 do
-                        let signX = if (i &&& 1) = 0 then -1.0 else 1.0
-                        let signY = if (i &&& 2) = 0 then -1.0 else 1.0
-                        let signZ = if (i &&& 4) = 0 then -1.0 else 1.0
-                        let localCorner = Vector3(h.X * signX, h.Y * signY, h.Z * signZ)
-                        let worldCorner = b1.Position + b1.Orientation * localCorner
-                        lowestPointZ <- min lowestPointZ worldCorner.Z
-                else
-                    lowestPointZ <- worldAABB_minZ
-                
-                if lowestPointZ < 0.0 then
-                    let penetrationDepth = -lowestPointZ
-                    let floorCollisionResult = CollisionResult(Vector3.Up * penetrationDepth)
-                    let mutable floorBody = Body.T()
-                    let totalImpulseScalar =
+                let mutable radiusZ = -1.0
+
+                if b1.MinAABB.Z < PENETRATION_SLOP then
+                    let lowestPointZ = b1.Position.Z - getRadiusZ &b1 &radiusZ
+                    
+                    if lowestPointZ < 0.0 then
+                        let penetrationDepth = -lowestPointZ
+                        let floorCollisionResult = CollisionResult.Create(Vector3.Up, penetrationDepth)
+                        let mutable floorBody = Body.T()
+                        let totalImpulseScalar =
+                            resolveDynamicCollision
+                                &b1
+                                &floorBody
+                                floorCollisionResult
+                                invMass1
+                                0.0
+                                
+                        let finalNormal = floorCollisionResult.Normal
+                        resolveStaticFriction
+                            &b1
+                            finalNormal
+                            totalImpulseScalar
+                            invMass1
+                            dt
+                        
+                        let island = &Island.getIslandRefForBody b1.Id islandRepo
+                        if not <| Unsafe.IsNullRef &island then
+                            island.UpdateMaxPenetration penetrationDepth
+                            island.IsGrounded <- true
+
+                if b1.MaxAABB.Z > WORLD_HEIGHT_IN_METERS - PENETRATION_SLOP then
+                    let highestPointZ = b1.Position.Z + getRadiusZ &b1 &radiusZ
+
+                    let topPenetration = highestPointZ - WORLD_HEIGHT_IN_METERS
+                    if topPenetration > 0.0 then
+                        let mutable floorBody = Body.T()
+                        let ceilingCollisionResult = CollisionResult.Create(Vector3.Down, topPenetration)
                         resolveDynamicCollision
                             &b1
                             &floorBody
-                            floorCollisionResult
-                            invMass1
-                            0.0
-                            
-                    let struct(finalNormal, _) = floorCollisionResult.Normalize() 
-                    resolveStaticFriction &b1 finalNormal totalImpulseScalar invMass1 dt
-                    
-                    let island = &Island.getIslandRefForBody b1.Id islandRepo
-                    if not <| Unsafe.IsNullRef &island then
-                        island.UpdateMaxPenetration penetrationDepth
-                        island.IsGrounded <- true
-                        
-                // Проверка столкновения с потолком
-                let mutable highestPointZ = Double.MinValue
-                let worldAABB_maxZ = b1.Position.Z + b1.Dimensions.Z * 0.5
-                if worldAABB_maxZ > WORLD_HEIGHT_IN_METERS - PENETRATION_SLOP then
-                    for i = 0 to 7 do
-                        let signX = if (i &&& 1) = 0 then -1.0 else 1.0
-                        let signY = if (i &&& 2) = 0 then -1.0 else 1.0
-                        let signZ = if (i &&& 4) = 0 then -1.0 else 1.0
-                        let localCorner = Vector3(h.X * signX, h.Y * signY, h.Z * signZ)
-                        let worldCorner = b1.Position + b1.Orientation * localCorner
-                        highestPointZ <- max highestPointZ worldCorner.Z
-                else
-                    highestPointZ <- worldAABB_maxZ
-
-                let topPenetration = highestPointZ - WORLD_HEIGHT_IN_METERS
-                if topPenetration > 0.0 then
-                    let mutable floorBody = Body.T()
-                    let ceilingCollisionResult = CollisionResult(Vector3.Down * topPenetration)
-                    resolveDynamicCollision &b1 &floorBody ceilingCollisionResult b1.InvMass 0.0 |> ignore
+                            ceilingCollisionResult
+                            b1.InvMass
+                            0.0 |> ignore
         
         let private resolveDynamicDynamicCollision
             (b1: byref<Body.T>)
@@ -3322,21 +3308,18 @@ module Engine =
                         cachedAxis
                     
                 if result.AreColliding then
-                    let struct(finalNormal, penetrationDepth) = result.Normalize()
-
-                    let stableResult = CollisionResult(finalNormal * penetrationDepth)
                     let totalImpulseScalar =
                         resolveDynamicCollision
                             &b1
                             &b2
-                            stableResult
+                            result
                             b1.InvMass
                             b2.InvMass
                                                 
                     resolveDynamicFriction
                         &b1
                         &b2
-                        finalNormal
+                        result.Normal
                         totalImpulseScalar
                         b1.InvMass
                         b2.InvMass
@@ -3346,12 +3329,12 @@ module Engine =
                     
                     let contactKey = ContactKey.key b1.Id b2.Id
                     island1.AddOrUpdateContact(contactKey, CONTACT_TTL, newCachedAxis)
-                    island1.UpdateMaxPenetration penetrationDepth
+                    island1.UpdateMaxPenetration result.Depth
                     
                     if island1.Id <> island2.Id then
                         islandRepo |> Island.requestMerge island1.Id island2.Id
                         island2.AddOrUpdateContact(contactKey, CONTACT_TTL, newCachedAxis)                              
-                        island2.UpdateMaxPenetration penetrationDepth
+                        island2.UpdateMaxPenetration result.Depth
                         
                     b1.IsSnappedToGrid <- false
                     b2.IsSnappedToGrid <- false
@@ -3390,14 +3373,14 @@ module Engine =
                         cachedAxis
                         
                 if result.AreColliding then
-                    let struct(finalNormal, penetrationDepth) = result.Normalize()
-                    let stableResult = CollisionResult(finalNormal * penetrationDepth)
-                                                    
+                    let finalNormal = result.Normal
+                    let penetrationDepth = result.Depth
+                           
                     let totalImpulseScalar =
                         resolveDynamicCollision
                             &b1
                             &b2
-                            stableResult
+                            result
                             b1.InvMass
                             b2.InvMass
                                                     
@@ -3441,10 +3424,9 @@ module Engine =
                     staticOrient
 
             if result.AreColliding then
-                let struct(finalNormal, penetrationDepth) = result.Normalize()
-                let stableResult = CollisionResult(finalNormal * penetrationDepth)
-
-                let totalImpulseScalar = resolveStaticCollision &b1 stableResult
+                let finalNormal = result.Normal
+                let penetrationDepth = result.Depth
+                let totalImpulseScalar = resolveStaticCollision &b1 result
                                         
                 resolveStaticFriction &b1 finalNormal totalImpulseScalar b1.InvMass dt
                 let island = &Island.getIslandRefForBody b1.Id islandRepo
@@ -3501,10 +3483,10 @@ module Engine =
                         buffers.BodiesToAdd.Add newBody
                         buffers.FloraToRemoveIds.Add treeData.Id
                     else
-                        let struct(finalNormal, penetrationDepth) = result.Normalize()
+                        let finalNormal = result.Normal
+                        let penetrationDepth = result.Depth
                         island.UpdateMaxPenetration penetrationDepth
-                        let stableResult = CollisionResult(finalNormal * penetrationDepth)
-                        let totalImpulseScalar = resolveStaticCollision &b1 stableResult
+                        let totalImpulseScalar = resolveStaticCollision &b1 result
                         resolveStaticFriction &b1 finalNormal totalImpulseScalar b1.InvMass dt
         
         let private resolveNarrowPhaseCollisions
