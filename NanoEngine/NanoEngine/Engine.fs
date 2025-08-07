@@ -895,19 +895,34 @@ module Engine =
                 {
                     _logger : ILogger
                     _prisms : Dictionary<uint64, Material>
+                    _gravityCheckCandidates: PooledList<uint64>
                     mutable _idGenerator: int
                 }
             
             member this.Prisms : IReadOnlyDictionary<_, _> = this._prisms
-        
+            member this.Dispose() = this._gravityCheckCandidates |> Dispose.action
+            interface IDisposable with
+                member this.Dispose() = this.Dispose()
         let createRepo() =
             {
                 _logger = Log.ForContext<Repo>()
                 _prisms = Dictionary()
+                _gravityCheckCandidates = new PooledList<_>()
                 _idGenerator = -1
             }
             
-        let removePrism key r = r._prisms.Remove key
+        let removePrism key r =
+            if r._prisms.Remove key then
+                let coords = key |> SubPrismKey.unpack
+                let aboveCoords = SubPrismCoords.Normalize(coords.Q, coords.R, coords.Z + 1, coords.SubIndex)
+                let aboveKey = aboveCoords |> SubPrismKey.pack
+
+                if r._prisms.ContainsKey aboveKey then
+                    if not <| r._gravityCheckCandidates.Contains aboveKey then
+                        r._gravityCheckCandidates.Add aboveKey
+                true
+            else
+                false
         
         let addPrism(coords: SubPrismCoords)  (material: Material) r =
             let coords = coords |> SubPrismKey.pack
@@ -925,9 +940,12 @@ module Engine =
                 r |> isSolid supportCoords
 
         let updatePhysics(fallingPrisms: PooledList<Body.T>) (prismsToRemove: PooledList<uint64>) r=
-            for kvp in r._prisms do
-                if kvp.Value = Material.GravityEnabled then
-                    let coordsKey = kvp.Key
+            for i = r._gravityCheckCandidates.Count - 1 downto 0 do
+                let coordsKey = r._gravityCheckCandidates[i]
+
+                if not <| r._prisms.ContainsKey coordsKey then
+                    r._gravityCheckCandidates.RemoveAt i
+                elif r._prisms[coordsKey] = Material.GravityEnabled then
                     let coords = coordsKey |> SubPrismKey.unpack
                     let pos = coords |> Grid.getTriangularPrismCenter 
                     let checkPos = pos - Vector3(0.0, 0.0, HEX_HEIGHT / 2.0 + 0.01)
@@ -949,10 +967,10 @@ module Engine =
                                 0.5)
 
                         r._idGenerator <- r._idGenerator - 1
-
                         fallingPrisms.Add body
-
                         prismsToRemove.Add coordsKey
+
+                r._gravityCheckCandidates.RemoveAt i
 
     [<RequireQualifiedAccess>]
     module Flora =
@@ -2175,15 +2193,30 @@ module Engine =
                     
                     targetIsland.MergeContactsFrom &sourceIsland
    
-                    targetIsland.MinAABB.X <- min targetIsland.MinAABB.X sourceIsland.MinAABB.X
-                    targetIsland.MinAABB.Y <- min targetIsland.MinAABB.Y sourceIsland.MinAABB.Y
-                    targetIsland.MinAABB.Z <- min targetIsland.MinAABB.Z sourceIsland.MinAABB.Z
+                    let mutable finalMin = targetIsland.MinAABB
+                    let mutable finalMax = targetIsland.MaxAABB
+                    let sourceMin = sourceIsland.MinAABB
+                    let sourceMax = sourceIsland.MaxAABB
+
+                    let mutable delta = sourceMin - finalMin
+                    WorldLimits.relative &delta
+                    let adjustedSourceMin = finalMin + delta
+
+                    delta <- sourceMax - finalMin
+                    WorldLimits.relative &delta
+                    let adjustedSourceMax = finalMin + delta
                     
-                    targetIsland.MaxAABB.X <- max targetIsland.MaxAABB.X sourceIsland.MaxAABB.X
-                    targetIsland.MaxAABB.Y <- max targetIsland.MaxAABB.Y sourceIsland.MaxAABB.Y
-                    targetIsland.MaxAABB.Z <- max targetIsland.MaxAABB.Z sourceIsland.MaxAABB.Z
+                    finalMin.X <- min finalMin.X adjustedSourceMin.X
+                    finalMin.Y <- min finalMin.Y adjustedSourceMin.Y
+                    finalMin.Z <- min finalMin.Z adjustedSourceMin.Z
                     
-                    recalculateAABB &targetIsland r
+                    finalMax.X <- max finalMax.X adjustedSourceMax.X
+                    finalMax.Y <- max finalMax.Y adjustedSourceMax.Y
+                    finalMax.Z <- max finalMax.Z adjustedSourceMax.Z
+
+                    targetIsland.MinAABB <- finalMin
+                    targetIsland.MaxAABB <- finalMax
+
                     addIslandToGrid &targetIsland r
                     
                     r._freeIds.Add sourceIsland.Id
@@ -2267,8 +2300,7 @@ module Engine =
             r._removeIslandsBuffer.Clear()
             
         let processIslandChanges geometryRepo spatialHash (buffers: Buffers) r =
-            
-            r._staticSupportCache.Clear()
+
             r._mergeRedirects.Clear()
             r._islandsInvolvedInMerge.Clear()
             
@@ -2676,6 +2708,7 @@ module Engine =
             this._floraRepo |> Dispose.action
             this._buffers |> Dispose.action
             this._spatialHash |> Dispose.action
+            this._geometryRepo |> Dispose.action
             
         interface IDisposable with
             member this.Dispose() = this.Dispose()
