@@ -1259,7 +1259,7 @@ module Engine =
             CollisionDestroyedFlora: HashSet<int>
             CollisionProcessedStatic: HashSet<uint64>
             CollisionProcessedFlora: HashSet<int>
-
+            CollisionFrameStaticCache : Dictionary<uint64, struct(Vector3 * Vector3 * Matrix3x3)>
             BodiesToAdd: PooledList<Body.T>
             BodiesToRemoveIds: PooledList<int>
             FloraToRemoveIds: PooledList<int>
@@ -1290,7 +1290,8 @@ module Engine =
             this.CollisionDestroyedFlora.Clear()
             this.CollisionProcessedStatic.Clear()
             this.CollisionProcessedFlora.Clear()
-
+            this.CollisionFrameStaticCache.Clear()
+            
             this.BodiesToAdd.Clear()
             this.BodiesToRemoveIds.Clear()
             this.FloraToRemoveIds.Clear()
@@ -1309,6 +1310,8 @@ module Engine =
                 CollisionDestroyedFlora = HashSet()
                 CollisionProcessedStatic = HashSet()
                 CollisionProcessedFlora = HashSet()
+                CollisionFrameStaticCache = Dictionary<_, _>()
+                
                 BodiesToAdd = new PooledList<_>()
                 BodiesToRemoveIds = new PooledList<_>()
                 FloraToRemoveIds = new PooledList<_>()
@@ -3441,16 +3444,21 @@ module Engine =
                     b1.IsSnappedToGrid <- false
                     b2.IsSnappedToGrid <- false
         
-        let private resolveStaticGeometryCollision (b1: byref<Body.T>) cellKey islandRepo dt =
-            let struct (pos, dims, orient) = cellKey |> Grid.getPrismSpaceByKey 
+        let private resolveStaticGeometryCollision
+            (b1: byref<Body.T>)
+            staticPos
+            staticDims
+            staticOrient
+            islandRepo
+            dt =
             let result =
                 Collision.checkCollisionSAT
                     b1.Position
                     b1.Dimensions
                     b1.Orientation
-                    pos
-                    dims
-                    orient
+                    staticPos
+                    staticDims
+                    staticOrient
 
             if result.AreColliding then
                 let struct(finalNormal, penetrationDepth) = result.Normalize()
@@ -3534,6 +3542,8 @@ module Engine =
 
             let checkedBodyPairs = buffers.CollisionCheckedBodyPairs
             let destroyedFlora = buffers.CollisionDestroyedFlora
+            let frameStaticCache = buffers.CollisionFrameStaticCache
+            
             checkedBodyPairs.Clear()
             destroyedFlora.Clear()
 
@@ -3556,8 +3566,22 @@ module Engine =
 
                     for cellKey in occupiedCells do
                         if geometryRepo |> Geometry.isSolid cellKey then
+                            let mutable isPrismDataExists = false
+                            let prismData = &CollectionsMarshal.GetValueRefOrAddDefault(frameStaticCache, cellKey, &isPrismDataExists)
+
+                            if not <| isPrismDataExists then
+                                prismData <- cellKey |> Grid.getPrismSpaceByKey
+
+                            let struct(staticPos, staticDims, staticOrient) = prismData
+                            
                             if processedStatic.Add cellKey then
-                                resolveStaticGeometryCollision &b1 cellKey islandRepo sub_dt
+                                resolveStaticGeometryCollision
+                                    &b1
+                                    staticPos
+                                    staticDims
+                                    staticOrient
+                                    islandRepo
+                                    sub_dt
 
                         match floraRepo |> Flora.tryGetTreesInCell cellKey with
                         | true, treeIds ->
