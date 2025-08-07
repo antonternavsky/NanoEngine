@@ -1597,6 +1597,7 @@ module Engine =
                     MaxPenetrationThisStep = 0.0
                     MinAABB = Vector3(Double.MaxValue, Double.MaxValue, Double.MaxValue)
                     MaxAABB = Vector3(Double.MinValue, Double.MinValue, Double.MinValue)
+                    IsGroundedCacheValid = false
                     OccupiedGridCells = new PooledList<uint64>()
                 }
             val Id: int
@@ -1611,6 +1612,7 @@ module Engine =
             val mutable MaxPenetrationThisStep : double
             val mutable MinAABB: Vector3
             val mutable MaxAABB: Vector3
+            val mutable IsGroundedCacheValid : bool
             val OccupiedGridCells: PooledList<uint64>
             
             member inline this.BodiesSpan : ReadOnlySpan<int> = this.Bodies.Span
@@ -1632,7 +1634,8 @@ module Engine =
             member inline this.AddOrUpdateContact(key, ttl, newCachedAxis) =
                 this.EnsureContactsExist()
                 this._contactsHolder.Contacts.AddOrUpdate(key, ttl, newCachedAxis)
-
+                this.IsGroundedCacheValid <- false
+                
             member inline this.TryGetCachedAxis(key, axis: byref<int>) =
                 if isNull this._contactsHolder then
                     axis <- -1
@@ -1644,8 +1647,9 @@ module Engine =
                 if isNull this._contactsHolder then
                     false
                 else
+                    this.IsGroundedCacheValid <- false
                     this._contactsHolder.Contacts.Remove(key)
-
+                                     
             member this.GetContactKeys() : ICollection<int64> =
                 if isNull this._contactsHolder then
                     Array.Empty() :> ICollection<int64>
@@ -1925,53 +1929,58 @@ module Engine =
             bodyRepo
             geometryRepo
             spatialHash
-            (island: inref<T>)
+            (island: byref<T>)
             r =
-            
-            if island.BodiesSpan.Length = 0 then
-                true
-            elif island.BodiesSpan.Length = 1 then
-                let bodyId = island.BodiesSpan[0]
-                let body = &Body.getRef bodyId bodyRepo
-                if Unsafe.IsNullRef &body then
-                    false
-                else
-                    hasStaticSupport &body spatialHash geometryRepo r
+            if island.IsGroundedCacheValid then
+                island.IsGrounded
             else
-                use anchors = new PooledList<int>()
-                for bodyId in island.BodiesSpan do
+                if island.BodiesSpan.Length = 0 then
+                    island.IsGrounded <- true
+                    island.IsGroundedCacheValid <- true
+                elif island.BodiesSpan.Length = 1 then
+                    let bodyId = island.BodiesSpan[0]
                     let body = &Body.getRef bodyId bodyRepo
-                    if not <| Unsafe.IsNullRef &body then
-                        if hasStaticSupport &body spatialHash geometryRepo r then
-                            anchors.Add bodyId
 
-                if anchors.Count = 0 then
-                    false
-                elif anchors.Count = island.BodiesSpan.Length then
-                    true
+                    island.IsGrounded <- hasStaticSupport &body spatialHash geometryRepo r
+                    island.IsGroundedCacheValid <- true 
                 else
-                    use adjacencyMap = buildAdjacencyMap island.BodiesSpan (island.GetContactKeys())
-                    use visited = new PooledSet<int>()
-                    use queue = new PooledQueue<int>()
-                    
-                    for anchorId in anchors.Span do
-                        if visited.Add anchorId then
-                            queue.Enqueue anchorId
+                    use anchors = new PooledList<int>()
+                    for bodyId in island.BodiesSpan do
+                        let body = &Body.getRef bodyId bodyRepo
+                        if not <| Unsafe.IsNullRef &body then
+                            if hasStaticSupport &body spatialHash geometryRepo r then
+                                anchors.Add bodyId
 
-                    while queue.Count > 0 do
-                        let currentId = queue.Dequeue()
-                        match adjacencyMap.TryGetValue currentId with
-                        | true, a ->
-                            for neighborId in a.Span do
-                                if visited.Add neighborId then
-                                    queue.Enqueue neighborId
-                        | _ -> ()
+                    if anchors.Count = 0 then
+                        island.IsGrounded <- false
+                        island.IsGroundedCacheValid <- true
+                    elif anchors.Count = island.BodiesSpan.Length then
+                        island.IsGrounded <- true
+                        island.IsGroundedCacheValid <- true
+                    else
+                        use adjacencyMap = buildAdjacencyMap island.BodiesSpan (island.GetContactKeys())
+                        use visited = new PooledSet<int>()
+                        use queue = new PooledQueue<int>()
                         
-                    let isGrounded = visited.Count = island.BodiesSpan.Length
-                    
-                    adjacencyMap.Values |> Seq.iter Dispose.action
-                    
-                    isGrounded
+                        for anchorId in anchors.Span do
+                            if visited.Add anchorId then
+                                queue.Enqueue anchorId
+
+                        while queue.Count > 0 do
+                            let currentId = queue.Dequeue()
+                            match adjacencyMap.TryGetValue currentId with
+                            | true, a ->
+                                for neighborId in a.Span do
+                                    if visited.Add neighborId then
+                                        queue.Enqueue neighborId
+                            | _ -> ()
+                        
+                        island.IsGrounded <- visited.Count = island.BodiesSpan.Length
+                        island.IsGroundedCacheValid <- true
+                                                
+                        adjacencyMap.Values |> Seq.iter Dispose.action
+                        
+                island.IsGrounded
     
         let getIslandRefForBody bodyId r = &CollectionsMarshal.GetValueRefOrNullRef(r._allIslands, r._bodyToIslandMap[bodyId])
         let getIslandIdForBody bodyId r = r._bodyToIslandMap[bodyId]
@@ -2126,7 +2135,7 @@ module Engine =
         let addBody bodyId r=
             let mutable isFound = false
             let islandId = &CollectionsMarshal.GetValueRefOrAddDefault(r._bodyToIslandMap, bodyId, &isFound)
-            if not <| isFound then
+            if not <| isFound then 
                 let mutable newIsland = r |> newIsland
                 r._allIslands.Add(newIsland.Id, newIsland)
                 islandId <- newIsland.Id
@@ -2147,9 +2156,11 @@ module Engine =
                        r._removeIslandsBuffer.Add islandId
                 else
                     recalculateAABBAndUpdateGrid &island r
-                    
+                
+                island.IsGroundedCacheValid <- false
+                
             r._staticSupportCache.Remove bodyId |> ignore
-            
+   
         let requestWakeIsland (island: byref<T>) r =
             island.FramesResting <- 0
             if not <| island.IsAwake && r._islandsToWake.Add island.Id then
@@ -2165,7 +2176,7 @@ module Engine =
                     
                     targetIsland.CantSleepFrames <- max sourceIsland.CantSleepFrames targetIsland.CantSleepFrames
                     targetIsland.FramesResting <- 0
-                    targetIsland.IsGrounded <- sourceIsland.IsGrounded || targetIsland.IsGrounded
+                    targetIsland.IsGroundedCacheValid <- false
                     targetIsland.UpdateMaxPenetration sourceIsland.MaxPenetrationThisStep
 
                     for bodyId in sourceIsland.BodiesSpan do
@@ -2280,7 +2291,7 @@ module Engine =
                 r._sleepingIslandIds.Remove removedId |> ignore
             r._removeIslandsBuffer.Clear()
             
-        let processIslandChanges geometryRepo spatialHash (buffers: Buffers) r =
+        let processIslandChanges spatialHash (buffers: Buffers) r =
 
             r._mergeRedirects.Clear()
             r._islandsInvolvedInMerge.Clear()
@@ -2295,7 +2306,8 @@ module Engine =
                 elif not island.IsAwake then
                     island.IsAwake <- true
                     island.FramesResting <- 0
-
+                    island.IsGroundedCacheValid <- false
+                    
                     // It is strictly forbidden to erase ContactTTL,
                     // because any awakened island must remember all its contacts, so as not to
                     // start the tedious and expensive procedure of assembling back into the island again
@@ -2362,24 +2374,12 @@ module Engine =
                                        originalIsland.TryGetCachedAxis(contactKey, &cachedAxis) |> ignore
                                        newFragmentIsland.AddOrUpdateContact(contactKey, CONTACT_TTL, cachedAxis)
                                 
-                                newFragmentIsland.IsGrounded <-
-                                    isGrounded
-                                        r._bodyRepo
-                                        geometryRepo
-                                        r._spatialHash
-                                        &newFragmentIsland
-                                        r
-                                        
+                                newFragmentIsland.IsGroundedCacheValid <- false
+       
                                 recalculateAABBAndUpdateGrid &newFragmentIsland r
                                 
-                        originalIsland.IsGrounded <-
-                            isGrounded
-                                r._bodyRepo
-                                geometryRepo
-                                r._spatialHash
-                                &originalIsland
-                                r
-                        
+                        originalIsland.IsGroundedCacheValid <- false
+ 
                         recalculateAABBAndUpdateGrid &originalIsland r
 
                         use contactsToRemove = new PooledList<int64>()
@@ -2731,10 +2731,14 @@ module Engine =
             let h = obbDims / 2.0
             let mutable delta = point - obbPos
             WorldLimits.relative &delta
-            let localPoint = obbOrient.Transpose() * delta
-            abs(localPoint.X) <= h.X + PENETRATION_SLOP  &&
-            abs(localPoint.Y) <= h.Y + PENETRATION_SLOP  &&
-            abs(localPoint.Z) <= h.Z + PENETRATION_SLOP 
+            
+            let localX = Vector3.Dot(delta, obbOrient.R0)
+            let localY = Vector3.Dot(delta, obbOrient.R1)
+            let localZ = Vector3.Dot(delta, obbOrient.R2)
+
+            abs(localX) <= h.X + PENETRATION_SLOP
+            && abs(localY) <= h.Y + PENETRATION_SLOP
+            && abs(localZ) <= h.Z + PENETRATION_SLOP
 
         let private checkPartnersInIsland
             checkPoint
@@ -3283,6 +3287,8 @@ module Engine =
         let private resolveDynamicDynamicCollision
             (b1: byref<Body.T>)
             (b2: byref<Body.T>)
+            (island1: byref<Island.T>)
+            (island2: byref<Island.T>)
             islandRepo
             dt =
             
@@ -3292,7 +3298,6 @@ module Engine =
             let maxB = b2.MaxAABB
             
             if Collision.checkCollisionAABB minA maxA minB maxB then
-                let island1 = &Island.getIslandRefForBody b1.Id islandRepo
                 let contactKey = ContactKey.key b1.Id b2.Id
                 let mutable cachedAxis = -1
                 island1.TryGetCachedAxis(contactKey, &cachedAxis) |> ignore
@@ -3325,8 +3330,6 @@ module Engine =
                         b2.InvMass
                         dt
 
-                    let island2 = &Island.getIslandRefForBody b2.Id islandRepo
-                    
                     let contactKey = ContactKey.key b1.Id b2.Id
                     island1.AddOrUpdateContact(contactKey, CONTACT_TTL, newCachedAxis)
                     island1.UpdateMaxPenetration result.Depth
@@ -3339,9 +3342,6 @@ module Engine =
                     b1.IsSnappedToGrid <- false
                     b2.IsSnappedToGrid <- false
                 elif checkBodyProximity minA maxA minB maxB then
-                    let island1 = &Island.getIslandRefForBody b1.Id islandRepo
-                    let island2 = &Island.getIslandRefForBody b2.Id islandRepo
-
                     if island1.Id = island2.Id then
                         let contactKey = ContactKey.key b1.Id b2.Id
                         island1.AddOrUpdateContact(contactKey, CONTACT_TTL, newCachedAxis)
@@ -3349,6 +3349,8 @@ module Engine =
         let private resolveDynamicSleepingCollision
             (b1: byref<Body.T>)
             (b2: byref<Body.T>)
+            (island1: byref<Island.T>)
+            (island2: byref<Island.T>)
             islandRepo
             dt =
             let minA = b1.MinAABB
@@ -3357,7 +3359,6 @@ module Engine =
             let maxB = b2.MaxAABB
             
             if Collision.checkCollisionAABB minA maxA minB maxB then
-                let island1 = &Island.getIslandRefForBody b1.Id islandRepo
                 let contactKey = ContactKey.key b1.Id b2.Id
                 let mutable cachedAxis = -1
                 island1.TryGetCachedAxis(contactKey, &cachedAxis) |> ignore
@@ -3392,9 +3393,7 @@ module Engine =
                         b1.InvMass
                         b2.InvMass
                         dt
-
-                    let island2 = &Island.getIslandRefForBody b2.Id islandRepo
-                                                    
+                          
                     Island.requestWakeIsland &island2 islandRepo
                     islandRepo |> Island.requestMerge island2.Id island1.Id
 
@@ -3409,10 +3408,10 @@ module Engine =
         
         let private resolveStaticGeometryCollision
             (b1: byref<Body.T>)
+            (island: byref<Island.T>)
             staticPos
             staticDims
             staticOrient
-            islandRepo
             dt =
             let result =
                 Collision.checkCollisionSAT
@@ -3429,9 +3428,9 @@ module Engine =
                 let totalImpulseScalar = resolveStaticCollision &b1 result
                                         
                 resolveStaticFriction &b1 finalNormal totalImpulseScalar b1.InvMass dt
-                let island = &Island.getIslandRefForBody b1.Id islandRepo
                 if not <| Unsafe.IsNullRef &island then
                     island.UpdateMaxPenetration penetrationDepth
+                    island.IsGroundedCacheValid <- true
                     island.IsGrounded <- true
                     
         let private resolveFloraCollision
@@ -3539,10 +3538,10 @@ module Engine =
                             if processedStatic.Add cellKey then
                                 resolveStaticGeometryCollision
                                     &b1
+                                    &island
                                     staticPos
                                     staticDims
                                     staticOrient
-                                    islandRepo
                                     sub_dt
 
                         match floraRepo |> Flora.tryGetTreesInCell cellKey with
@@ -3555,7 +3554,13 @@ module Engine =
                     for j = i + 1 to bodiesInIsland.Length - 1 do
                         let id2 = bodiesInIsland[j]
                         let b2 = &Body.getRef id2 bodyRepo
-                        resolveDynamicDynamicCollision &b1 &b2 islandRepo sub_dt
+                        resolveDynamicDynamicCollision
+                            &b1
+                            &b2
+                            &island
+                            &island
+                            islandRepo
+                            sub_dt
                         
             for pairKey in collidingIslandPairs do
                 let struct(islandId1, islandId2) = ContactKey.unpack pairKey            
@@ -3570,9 +3575,21 @@ module Engine =
                             let b2 = &Body.getRef bodyId2 bodyRepo
                             
                             if island2.IsAwake then
-                                resolveDynamicDynamicCollision &b1 &b2 islandRepo sub_dt
+                                resolveDynamicDynamicCollision
+                                    &b1
+                                    &b2
+                                    &island1
+                                    &island2
+                                    islandRepo
+                                    sub_dt
                             else
-                                resolveDynamicSleepingCollision &b1 &b2 islandRepo sub_dt
+                                resolveDynamicSleepingCollision
+                                    &b1
+                                    &b2
+                                    &island1
+                                    &island2
+                                    islandRepo
+                                    sub_dt
                         
         let private postProcessAndUpdateSleepState engine =
             let islandRepo = engine._islandRepo
@@ -3615,7 +3632,7 @@ module Engine =
                     if island.IsSlow then
                         if island.MaxPenetrationThisStep > MAX_PENETRATION then
                             island.FramesResting <- 0
-                        elif island.IsGrounded then
+                        elif Island.isGrounded bodyRepo geometryRepo spatialHash &island islandRepo then
                             island.FramesResting <- island.FramesResting + 1
                             
                             if island.FramesResting >= FRAMES_TO_SLEEP && island.CantSleepFrames <= 0 then
@@ -3709,7 +3726,7 @@ module Engine =
 
             engine |> applyDeferredChanges
 
-            engine._islandRepo |> Island.processIslandChanges engine._geometryRepo engine._spatialHash engine._buffers
+            engine._islandRepo |> Island.processIslandChanges engine._spatialHash engine._buffers
                         
             let buffers = engine._buffers
             buffers.Clear()
