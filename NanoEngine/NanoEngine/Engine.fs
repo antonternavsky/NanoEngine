@@ -509,6 +509,11 @@ module Engine =
                 velocity,
                 supportCoords,
                 friction) =
+                let struct(minCorner, maxCorner) =
+                    Collision.getAABB
+                        position
+                        dimensions
+                        orientation
                 {
                     Id = id
                     BodyType = bodyType
@@ -534,8 +539,8 @@ module Engine =
                     IsForceFalling = false
                     IsSnappedToGrid = false
                     IsGravityEnabled = true
-                    MinAABB = Vector3(Double.MaxValue, Double.MaxValue, Double.MaxValue)
-                    MaxAABB = Vector3(Double.MinValue, Double.MinValue, Double.MinValue)
+                    MinAABB = minCorner
+                    MaxAABB = maxCorner
                 }
 
             val Id: int
@@ -1809,7 +1814,6 @@ module Engine =
 
                 island.MinAABB <- centroid + minExtents
                 island.MaxAABB <- centroid + maxExtents
-
                 
         let inline private newIsland r =
             let newId =
