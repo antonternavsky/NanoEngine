@@ -1264,7 +1264,6 @@ module Engine =
             CollisionDestroyedFlora: HashSet<int>
             CollisionProcessedStatic: HashSet<uint64>
             CollisionProcessedFlora: HashSet<int>
-            CollisionFrameStaticCache : Dictionary<uint64, struct(Vector3 * Vector3 * Matrix3x3)>
             BodiesToAdd: PooledList<Body.T>
             BodiesToRemoveIds: PooledList<int>
             FloraToRemoveIds: PooledList<int>
@@ -1294,9 +1293,7 @@ module Engine =
             this.CollisionIslandPairs.Clear()
             this.CollisionDestroyedFlora.Clear()
             this.CollisionProcessedStatic.Clear()
-            this.CollisionProcessedFlora.Clear()
-            this.CollisionFrameStaticCache.Clear()
-            
+ 
             this.BodiesToAdd.Clear()
             this.BodiesToRemoveIds.Clear()
             this.FloraToRemoveIds.Clear()
@@ -1315,8 +1312,7 @@ module Engine =
                 CollisionDestroyedFlora = HashSet()
                 CollisionProcessedStatic = HashSet()
                 CollisionProcessedFlora = HashSet()
-                CollisionFrameStaticCache = Dictionary<_, _>()
-                
+
                 BodiesToAdd = new PooledList<_>()
                 BodiesToRemoveIds = new PooledList<_>()
                 FloraToRemoveIds = new PooledList<_>()
@@ -2694,6 +2690,7 @@ module Engine =
                 _geometryRepo: Geometry.Repo
                 _bodyRepo : Body.Repo
                 _islandRepo : Island.Repo
+                _staticCache: Dictionary<uint64, struct(Vector3 * Vector3 * Matrix3x3)>
                 _liquidRepo : Liquid.Repo
                 _floraRepo : Flora.Repo
                 _buffers : Buffers
@@ -2743,6 +2740,7 @@ module Engine =
             _liquidRepo = Liquid.createRepo geometryRepo
             _buffers = buffers
             _spatialHash = spatialHash
+            _staticCache = Dictionary<_, _>()
             _random = Random(Guid.NewGuid().GetHashCode())
             _dt = dt
         }
@@ -3546,7 +3544,7 @@ module Engine =
 
             let checkedBodyPairs = buffers.CollisionCheckedBodyPairs
             let destroyedFlora = buffers.CollisionDestroyedFlora
-            let frameStaticCache = buffers.CollisionFrameStaticCache
+            let staticCache = engine._staticCache
             
             checkedBodyPairs.Clear()
             destroyedFlora.Clear()
@@ -3571,7 +3569,7 @@ module Engine =
                     for cellKey in occupiedCells do
                         if geometryRepo |> Geometry.isSolid cellKey then
                             let mutable isPrismDataExists = false
-                            let prismData = &CollectionsMarshal.GetValueRefOrAddDefault(frameStaticCache, cellKey, &isPrismDataExists)
+                            let prismData = &CollectionsMarshal.GetValueRefOrAddDefault(staticCache, cellKey, &isPrismDataExists)
 
                             if not <| isPrismDataExists then
                                 prismData <- cellKey |> Grid.getPrismSpaceByKey
@@ -3728,7 +3726,8 @@ module Engine =
             
             for coords in buffers.PrismsToRemoveCoords.Span do
                 geometryRepo |> Geometry.removePrism coords |> ignore
-
+                engine._staticCache.Remove coords |> ignore
+                
             if buffers.FloraToRemoveIds.Count > 0 then
                 for id in buffers.FloraToRemoveIds.Span do
                     floraRepo |> Flora.removeTree id
