@@ -37,7 +37,7 @@ module Engine =
     let MAX_SPEED_SQ = pown MAX_SPEED 2
     let WORLD_HEIGHT_IN_METERS = double GRID_HEIGHT_Z * HEX_HEIGHT
     let [<Literal>] FRAMES_TO_UNROOT = 2
-    let POSITION_THRESHOLD_SQ = pown (HEX_RADIUS * 0.0425) 2 // ~2.46см
+    let POSITION_THRESHOLD_SQ = pown (HEX_RADIUS * 0.03745) 2
     let ORIENTATION_THRESHOLD = 0.9998 // cos(1.14 градуса)
             
     [<RequireQualifiedAccess>]
@@ -2797,76 +2797,80 @@ module Engine =
     
     [<RequireQualifiedAccess>]
     module Simulation = 
-        let inline private isPointInsideOBB (point: Vector3) (obbPos: Vector3) (obbDims: Vector3) (obbOrient: Matrix3x3) =
-            let h = obbDims / 2.0
-            let mutable delta = point - obbPos
-            WorldLimits.relative &delta
-            
-            let localX = Vector3.Dot(delta, obbOrient.R0)
-            let localY = Vector3.Dot(delta, obbOrient.R1)
-            let localZ = Vector3.Dot(delta, obbOrient.R2)
-
-            abs(localX) <= h.X + PENETRATION_SLOP
-            && abs(localY) <= h.Y + PENETRATION_SLOP
-            && abs(localZ) <= h.Z + PENETRATION_SLOP
-
-        let private checkPartnersInIsland
-            checkPoint
-            bodyRepo
-            (body: inref<Body.T>)
-            (island: inref<Island.T>) =
-                
-            let mutable isFound = false
-            let mutable i = 0
-            while not <| isFound && i < island.BodiesSpan.Length do 
-                let otherId = island.BodiesSpan[i]
-                i <- i + 1
-                if otherId <> body.Id then
-                    let otherBody = &Body.getRef otherId bodyRepo
-                    if not <| otherBody.IsFallingOver then
-                        if isPointInsideOBB checkPoint otherBody.Position otherBody.Dimensions otherBody.Orientation then
-                            isFound <- true
-            isFound
-
-        let private checkWorldPosForSupport
-            (p: Vector3)
-            geometryRepo
-            bodyRepo
-            (body: inref<Body.T>)
-            (island: inref<Island.T>) =
-
-            let mutable p = p
-            WorldLimits.wrapPosition &p
-            
-            let checkPos = Vector3(p.X, p.Y, p.Z - PENETRATION_SLOP)
-            let key = checkPos |> Grid.convertWorldToSubPrismCoords |> SubPrismKey.pack
-
-            geometryRepo |> Geometry.isSolid key || checkPartnersInIsland p bodyRepo &body &island
-
         let isPointSupported
             geometryRepo
             bodyRepo
             (body: inref<Body.T>)
             (island: inref<Island.T>)
-            (checkPoint: Vector3) =
+            (checkPoint: Vector3)
+            (buffers: Buffers) =
             if checkPoint.Z <= PENETRATION_SLOP then
                 true
             else
-                if checkWorldPosForSupport checkPoint geometryRepo bodyRepo &body &island then
-                    true
-                else
-                    let radius = HEX_RADIUS * 0.4
-                    if checkWorldPosForSupport (checkPoint + Vector3(radius, 0.0, 0.0)) geometryRepo bodyRepo &body &island then true
-                    elif checkWorldPosForSupport (checkPoint - Vector3(radius, 0.0, 0.0)) geometryRepo bodyRepo &body &island then true
-                    elif checkWorldPosForSupport (checkPoint + Vector3(0.0, radius, 0.0)) geometryRepo bodyRepo &body &island then true
-                    elif checkWorldPosForSupport (checkPoint - Vector3(0.0, radius, 0.0)) geometryRepo bodyRepo &body &island then true
-                    else false
+                let radius = HEX_RADIUS * 0.2
+                let checkDepth = PENETRATION_SLOP * 2.0
+                let probeDims = Vector3(radius * 2.0, radius * 2.0, checkDepth)
+                let probeCenter = Vector3(checkPoint.X, checkPoint.Y, checkPoint.Z - checkDepth / 2.0)
+                let probeOrientation = Matrix3x3.Identity
+
+                Grid.fillOverlappingSubPrismsAABB
+                    probeCenter
+                    probeDims
+                    probeOrientation
+                    buffers.UniquePrismsFilterBuffer
+                    buffers.UniquePrismsBuffer
+
+                let occupiedCells = buffers.UniquePrismsBuffer.Span
+                let mutable isSupported = false
+                let mutable i = 0
+                while not <| isSupported && i < occupiedCells.Length do
+                    let cellKey = occupiedCells[i]
+                    i <- i + 1
+                    if geometryRepo |> Geometry.isSolid cellKey then
+                        let struct(staticPos, staticDims, staticOrient) = cellKey |> Grid.getPrismSpaceByKey
+                        let result =
+                            Collision.checkCollisionSAT
+                                probeCenter
+                                probeDims
+                                probeOrientation
+                                staticPos
+                                staticDims
+                                staticOrient
+                        
+                        if result.AreColliding then
+                            isSupported <- true
+
+                if not <| isSupported then
+                    let probeMinCorner = probeCenter - probeDims / 2.0
+                    let probeMaxCorner = probeCenter + probeDims / 2.0
+
+                    let mutable i = 0
+                    while not <| isSupported && i < island.BodiesSpan.Length do
+                        let otherId = island.BodiesSpan[i]
+                        i <- i + 1
+                        if otherId <> body.Id then
+                            let otherBody = &Body.getRef otherId bodyRepo
+                            if Collision.checkCollisionAABB probeMinCorner probeMaxCorner otherBody.MinAABB otherBody.MaxAABB then
+                                let result =
+                                    Collision.checkCollisionSAT
+                                        probeCenter
+                                        probeDims
+                                        probeOrientation
+                                        otherBody.Position
+                                        otherBody.Dimensions
+                                        otherBody.Orientation
+
+                                if result.AreColliding then
+                                    isSupported <- true
+                                
+                isSupported
         
         let private tryInitiateFall
             (body: inref<Body.T>)
              geometryRepo
              bodyRepo
-             islandRepo=
+             islandRepo
+             buffers =
             if body.IsFallingOver || body.InvMass < EPSILON then
                 ValueNone
             else
@@ -2876,7 +2880,7 @@ module Engine =
                 WorldLimits.wrapPosition &projectedCenterOfMass
                 let islandId = islandRepo |> Island.getIslandIdForBody body.Id
                 let island = &Island.getIslandRef islandId islandRepo
-                let isCenterOfMassSupported = isPointSupported geometryRepo bodyRepo &body &island projectedCenterOfMass
+                let isCenterOfMassSupported = isPointSupported geometryRepo bodyRepo &body &island projectedCenterOfMass buffers
                 if isCenterOfMassSupported then
                     ValueNone
                 else
@@ -2963,29 +2967,22 @@ module Engine =
             (b2: byref<Body.T>)
             (normal: Vector3)
             normalImpulseSum
-            invMass1
-            invMass2
             dt =
-            let finalInvMass1 = if b1.IsFallingOver then 0.0 else invMass1
-            let finalInvMass2 = if b2.IsFallingOver then 0.0 else invMass2
+            let finalInvMass1 = if b1.IsFallingOver then 0.0 else b1.InvMass
+            let finalInvMass2 = if b2.IsFallingOver then 0.0 else b2.InvMass
             let totalInvMass = finalInvMass1 + finalInvMass2
         
             if totalInvMass > EPSILON then
-                let gravityForceB1 =
-                    if finalInvMass1 > 0.0 then
-                        (1.0 / finalInvMass1) * Vector3.Dot(-GRAVITY, normal)
-                    else
-                        0.0
-                let gravityForceB2 =
-                    if finalInvMass2 > 0.0 then
-                        (1.0 / finalInvMass2) * Vector3.Dot(GRAVITY, normal)
-                    else
-                        0.0
-                        
-                let gravityImpulse = (max gravityForceB1 gravityForceB2) * dt
+                let mutable effectiveNormalImpulse = normalImpulseSum
 
-                let effectiveNormalImpulse = normalImpulseSum + gravityImpulse
-        
+                let gravityComponent = Vector3.Dot(GRAVITY, normal)
+                if gravityComponent < 0.0 then
+                    let mass1 = if finalInvMass1 > EPSILON then 1.0/finalInvMass1 else 0.0
+                    let mass2 = if finalInvMass2 > EPSILON then 1.0/finalInvMass2 else 0.0
+                    let gravityForceAlongNormal = (mass1 + mass2) * -gravityComponent
+                    let gravityImpulse = gravityForceAlongNormal * dt
+                    effectiveNormalImpulse <- effectiveNormalImpulse + gravityImpulse
+
                 if effectiveNormalImpulse > 0.0 then
                     let frictionNormal = getStableFrictionNormal normal &b1 &b2
 
@@ -3355,7 +3352,8 @@ module Engine =
                             &floorBody
                             ceilingCollisionResult
                             b1.InvMass
-                            0.0 |> ignore
+                            0.0
+                        |> ignore
         
         let private resolveDynamicDynamicCollision
             (b1: byref<Body.T>)
@@ -3399,8 +3397,6 @@ module Engine =
                         &b2
                         result.Normal
                         totalImpulseScalar
-                        b1.InvMass
-                        b2.InvMass
                         dt
 
                     let contactKey = ContactKey.key b1.Id b2.Id
@@ -3463,8 +3459,6 @@ module Engine =
                         &b2
                         finalNormal
                         totalImpulseScalar
-                        b1.InvMass
-                        b2.InvMass
                         dt
                           
                     Island.requestWakeIsland &island2 islandRepo
@@ -3715,41 +3709,40 @@ module Engine =
                                     let bodyId = island.BodiesSpan[i]
                                     i <- i + 1
                                     let body = &Body.getRef bodyId bodyRepo
-                                    if not <| Unsafe.IsNullRef &body then
-                                        match tryInitiateFall &body geometryRepo bodyRepo islandRepo with
-                                        | ValueSome (struct (pivot, axis)) ->                                          
-                                            isIslandStable <- false
-                                            body.IsSnappedToGrid <- false
+                                    match tryInitiateFall &body geometryRepo bodyRepo islandRepo engine._buffers with
+                                    | ValueSome (struct (pivot, axis)) ->                                          
+                                        isIslandStable <- false
+                                        body.IsSnappedToGrid <- false
 
-                                            let dims = body.Dimensions
-                                            let flatnessThreshold = 1.0
+                                        let dims = body.Dimensions
+                                        let flatnessThreshold = 1.0
 
-                                            if dims.X > dims.Z * flatnessThreshold || dims.Y > dims.Z * flatnessThreshold then
-                                                island.FramesResting <- FRAMES_TO_SLEEP - 1
-                                                let mutable fallDirection = pivot - body.Position
-                                                WorldLimits.relative &fallDirection
-                                                fallDirection.Z <- 0.0
+                                        if dims.X > dims.Z * flatnessThreshold || dims.Y > dims.Z * flatnessThreshold then
+                                            island.FramesResting <- FRAMES_TO_SLEEP - 1
+                                            let mutable fallDirection = pivot - body.Position
+                                            WorldLimits.relative &fallDirection
+                                            fallDirection.Z <- 0.0
 
-                                                if fallDirection.MagnitudeSq() > EPSILON then
-                                                    let pushStrength = 1.6
-                                                    let horizontalPush = fallDirection.Normalize()
-                                                    let liftFactor = 0.4
-                                                    let verticalLift = Vector3.Up * liftFactor
-                                                    let combinedDirection = (horizontalPush + verticalLift).Normalize()
-                                                    body.Velocity <- body.Velocity + combinedDirection * pushStrength                            
-                                            else
-                                                island.FramesResting <- 0
-                                                body.IsFallingOver <- true
-                                                body.FallRotationProgress <- 0.0
-                                                body.FallInitialOrientation <- body.Orientation
-                                                body.FallDuration <- max 0.5 (body.Dimensions.Magnitude() / 5.0)
-                                                body.FallPivotPoint <- pivot
-                                                body.FallRotationAxis <- axis
+                                            if fallDirection.MagnitudeSq() > EPSILON then
+                                                let pushStrength = 1.6
+                                                let horizontalPush = fallDirection.Normalize()
+                                                let liftFactor = 0.4
+                                                let verticalLift = Vector3.Up * liftFactor
+                                                let combinedDirection = (horizontalPush + verticalLift).Normalize()
+                                                body.Velocity <- body.Velocity + combinedDirection * pushStrength                            
+                                        else
+                                            island.FramesResting <- 0
+                                            body.IsFallingOver <- true
+                                            body.FallRotationProgress <- 0.0
+                                            body.FallInitialOrientation <- body.Orientation
+                                            body.FallDuration <- max 0.5 (body.Dimensions.Magnitude() / 5.0)
+                                            body.FallPivotPoint <- pivot
+                                            body.FallRotationAxis <- axis
 
-                                                let mutable offset = body.Position - pivot
-                                                WorldLimits.relative &offset
-                                                body.InitialCenterOffsetFromPivot <- offset                      
-                                        | ValueNone -> ()
+                                            let mutable offset = body.Position - pivot
+                                            WorldLimits.relative &offset
+                                            body.InitialCenterOffsetFromPivot <- offset                      
+                                    | ValueNone -> ()
                                         
                                 if isIslandStable then
                                     for bodyId in island.BodiesSpan do
