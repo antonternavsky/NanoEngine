@@ -3040,10 +3040,13 @@ module Engine =
             invMass1
             dt =
             if invMass1 > EPSILON then
-                let gravityForce = if invMass1 > 0.0 then (1.0 / invMass1) * Vector3.Dot(-GRAVITY, normal) else 0.0
-                let gravityImpulse = gravityForce * dt
-                let effectiveNormalImpulse = normalImpulseSum + gravityImpulse
-
+                let mutable effectiveNormalImpulse = normalImpulseSum
+                let gravityComponent = Vector3.Dot(GRAVITY, normal)
+                if gravityComponent < 0.0 then
+                    let gravityForceAlongNormal = (1.0 / invMass1) * (-gravityComponent)
+                    let gravityImpulse = gravityForceAlongNormal * dt
+                    effectiveNormalImpulse <- effectiveNormalImpulse + gravityImpulse
+            
                 if effectiveNormalImpulse > 0.0 then
                     let staticBody = Body.T()
                     let frictionNormal = getStableFrictionNormal normal &b1 &staticBody
