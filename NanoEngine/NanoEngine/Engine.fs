@@ -18,6 +18,8 @@ module Engine =
     let [<Literal>] RESTITUTION_THRESHOLD = 2.0
     let [<Literal>] EPSILON = 1e-6
     let [<Literal>] EPSILON_X2 = EPSILON * EPSILON
+    let [<Literal>] EPSILON_F = 1e-5f
+    let [<Literal>] EPSILON_F_X2 = EPSILON_F * EPSILON_F
     let [<Literal>] SLEEP_VELOCITY_THRESHOLD_SQ = 0.01
     let [<Literal>] CONTACT_TTL = 3
     let [<Literal>] FRAMES_TO_SLEEP = CONTACT_TTL + 2
@@ -35,7 +37,9 @@ module Engine =
     let MAX_SPEED_SQ = pown MAX_SPEED 2
     let WORLD_HEIGHT_IN_METERS = double GRID_HEIGHT_Z * HEX_HEIGHT
     let [<Literal>] FRAMES_TO_UNROOT = 2
-    
+    let POSITION_THRESHOLD_SQ = pown (HEX_RADIUS * 0.0425) 2 // ~2.46см
+    let ORIENTATION_THRESHOLD = 0.9998 // cos(1.14 градуса)
+            
     [<RequireQualifiedAccess>]
     module Dispose =
         let inline action(a: #IDisposable) =
@@ -171,7 +175,32 @@ module Engine =
                         Vector3(xy_omc + zs, c + yy_omc, yz_omc - xs),
                         Vector3(xz_omc - ys, yz_omc + xs, c + zz_omc)
                     )
+    
+    [<RequireQualifiedAccess>]
+    module MathF =
+        type Vector3f = System.Numerics.Vector3
 
+        [<Struct; IsReadOnly>]
+        type Matrix3x3f =
+            val R0: Vector3f
+            val R1: Vector3f
+            val R2: Vector3f
+
+            new(r0, r1, r2) = { R0 = r0; R1 = r1; R2 = r2 }
+            
+            static member inline Identity =
+                Matrix3x3f(Vector3f.UnitX, Vector3f.UnitY, Vector3f.UnitZ)
+
+            member inline this.Transform(v: Vector3f) =
+                Vector3f(Vector3f.Dot(this.R0, v), Vector3f.Dot(this.R1, v), Vector3f.Dot(this.R2, v))
+                
+        let inline toFloatV3 (v: Vector3) = Vector3f(float32 v.X, float32 v.Y, float32 v.Z)
+
+        let inline toDoubleV3 (v: Vector3f) = Vector3(float v.X, float v.Y, float v.Z)
+
+        let inline toFloatM3 (m: Matrix3x3) =
+            Matrix3x3f(toFloatV3 m.R0, toFloatV3 m.R1, toFloatV3 m.R2)
+    
     type Material =
         | Static = 0uy
         | GravityEnabled = 1uy
@@ -385,62 +414,45 @@ module Engine =
                     axisOverlaps minA.Y maxA.Y minB.Y maxB.Y WorldLimits.Y
 
         [<Struct; IsByRefLike; IsReadOnly>]
-        type private AxisTestResult =
+        type private AxisTestResultF =
             val IsSeparating: bool
-            val PenetrationSq: double
-            val Axis: Vector3
+            val PenetrationSq: float32
+            val Axis: MathF.Vector3f
             new(isSeparating, penetrationSq, axis) =
-                {
-                    IsSeparating = isSeparating
-                    PenetrationSq = penetrationSq
-                    Axis = axis
-                }
+                { IsSeparating = isSeparating; PenetrationSq = penetrationSq; Axis = axis }
 
         let inline private testSingleAxis
             (index: int)
-            (h1: Vector3)
-            (h2: Vector3)
-            (delta: Vector3)
-            (o1: Matrix3x3)
-            (o2: Matrix3x3)
-            (ac00: float)
-            (ac01: float)
-            (ac02: float)
-            (ac10: float)
-            (ac11: float)
-            (ac12: float)
-            (ac20: float)
-            (ac21: float)
-            (ac22: float)
-            (t_x: float)
-            (t_y: float)
-            (t_z: float) =
+            (h1: MathF.Vector3f) (h2: MathF.Vector3f) (delta: MathF.Vector3f)
+            (o1: MathF.Matrix3x3f) (o2: MathF.Matrix3x3f)
+            (ac00: float32) (ac01: float32) (ac02: float32)
+            (ac10: float32) (ac11: float32) (ac12: float32)
+            (ac20: float32) (ac21: float32) (ac22: float32)
+            (t_x: float32) (t_y: float32) (t_z: float32) =
 
-            let mutable sep, R, axis, Lsq = 0.0, 0.0, Vector3.Zero, 1.0
+            let mutable sep, R, axis, Lsq = 0.0f, 0.0f, MathF.Vector3f.Zero, 1.0f
 
             match index with
-            | 0 -> sep <- abs t_x; R <- h1.X + h2.X * ac00 + h2.Y * ac01 + h2.Z * ac02; axis <- o1.R0
-            | 1 -> sep <- abs t_y; R <- h1.Y + h2.X * ac10 + h2.Y * ac11 + h2.Z * ac12; axis <- o1.R1
-            | 2 -> sep <- abs t_z; R <- h1.Z + h2.X * ac20 + h2.Y * ac21 + h2.Z * ac22; axis <- o1.R2
-
-            | 3 -> sep <- abs (Vector3.Dot(delta, o2.R0)); R <- h1.X * ac00 + h1.Y * ac10 + h1.Z * ac20 + h2.X; axis <- o2.R0
-            | 4 -> sep <- abs (Vector3.Dot(delta, o2.R1)); R <- h1.X * ac01 + h1.Y * ac11 + h1.Z * ac21 + h2.Y; axis <- o2.R1
-            | 5 -> sep <- abs (Vector3.Dot(delta, o2.R2)); R <- h1.X * ac02 + h1.Y * ac12 + h1.Z * ac22 + h2.Z; axis <- o2.R2
-
-            | 6 -> axis <- Vector3.Cross(o1.R0, o2.R0); Lsq <- axis.MagnitudeSq()
-            | 7 -> axis <- Vector3.Cross(o1.R0, o2.R1); Lsq <- axis.MagnitudeSq()
-            | 8 -> axis <- Vector3.Cross(o1.R0, o2.R2); Lsq <- axis.MagnitudeSq()
-            | 9 -> axis <- Vector3.Cross(o1.R1, o2.R0); Lsq <- axis.MagnitudeSq()
-            | 10 -> axis <- Vector3.Cross(o1.R1, o2.R1); Lsq <- axis.MagnitudeSq()
-            | 11 -> axis <- Vector3.Cross(o1.R1, o2.R2); Lsq <- axis.MagnitudeSq()
-            | 12 -> axis <- Vector3.Cross(o1.R2, o2.R0); Lsq <- axis.MagnitudeSq()
-            | 13 -> axis <- Vector3.Cross(o1.R2, o2.R1); Lsq <- axis.MagnitudeSq()
-            | 14 -> axis <- Vector3.Cross(o1.R2, o2.R2); Lsq <- axis.MagnitudeSq()
+            | 0 -> sep <- MathF.Abs t_x; R <- h1.X + h2.X * ac00 + h2.Y * ac01 + h2.Z * ac02; axis <- o1.R0
+            | 1 -> sep <- MathF.Abs t_y; R <- h1.Y + h2.X * ac10 + h2.Y * ac11 + h2.Z * ac12; axis <- o1.R1
+            | 2 -> sep <- MathF.Abs t_z; R <- h1.Z + h2.X * ac20 + h2.Y * ac21 + h2.Z * ac22; axis <- o1.R2
+            | 3 -> sep <- MathF.Abs (MathF.Vector3f.Dot(delta, o2.R0)); R <- h1.X * ac00 + h1.Y * ac10 + h1.Z * ac20 + h2.X; axis <- o2.R0
+            | 4 -> sep <- MathF.Abs (MathF.Vector3f.Dot(delta, o2.R1)); R <- h1.X * ac01 + h1.Y * ac11 + h1.Z * ac21 + h2.Y; axis <- o2.R1
+            | 5 -> sep <- MathF.Abs (MathF.Vector3f.Dot(delta, o2.R2)); R <- h1.X * ac02 + h1.Y * ac12 + h1.Z * ac22 + h2.Z; axis <- o2.R2
+            | 6 -> axis <- MathF.Vector3f.Cross(o1.R0, o2.R0); Lsq <- axis.LengthSquared()
+            | 7 -> axis <- MathF.Vector3f.Cross(o1.R0, o2.R1); Lsq <- axis.LengthSquared()
+            | 8 -> axis <- MathF.Vector3f.Cross(o1.R0, o2.R2); Lsq <- axis.LengthSquared()
+            | 9 -> axis <- MathF.Vector3f.Cross(o1.R1, o2.R0); Lsq <- axis.LengthSquared()
+            | 10 -> axis <- MathF.Vector3f.Cross(o1.R1, o2.R1); Lsq <- axis.LengthSquared()
+            | 11 -> axis <- MathF.Vector3f.Cross(o1.R1, o2.R2); Lsq <- axis.LengthSquared()
+            | 12 -> axis <- MathF.Vector3f.Cross(o1.R2, o2.R0); Lsq <- axis.LengthSquared()
+            | 13 -> axis <- MathF.Vector3f.Cross(o1.R2, o2.R1); Lsq <- axis.LengthSquared()
+            | 14 -> axis <- MathF.Vector3f.Cross(o1.R2, o2.R2); Lsq <- axis.LengthSquared()
             | _ -> ()
 
-            if Lsq > EPSILON_X2 then
+            if Lsq > EPSILON_F_X2 then
                 if index > 5 then
-                    sep <- abs (Vector3.Dot(delta, axis))
+                    sep <- MathF.Abs (MathF.Vector3f.Dot(delta, axis))
                     match index with
                     | 6 -> R <- h1.Y * ac20 + h1.Z * ac10 + h2.Y * ac02 + h2.Z * ac01
                     | 7 -> R <- h1.Y * ac21 + h1.Z * ac11 + h2.X * ac02 + h2.Z * ac00
@@ -454,54 +466,55 @@ module Engine =
                     | _ -> ()
 
                 if sep > R then
-                    AxisTestResult(true, 0.0, Vector3.Zero)
+                    AxisTestResultF(true, 0.0f, MathF.Vector3f.Zero)
                 else
                     let pen = R - sep
                     let penetrationSq = (pen * pen) / Lsq
-                    AxisTestResult(false, penetrationSq, axis)
+                    AxisTestResultF(false, penetrationSq, axis)
             else
-                AxisTestResult(false, Double.MaxValue, Vector3.Zero)
-                
+                AxisTestResultF(false, Single.MaxValue, MathF.Vector3f.Zero)
+
         let checkCollisionSATWithCachedAxis
-            (p1: Vector3)
-            (d1: Vector3)
-            (o1: Matrix3x3)
-            (p2: Vector3)
-            (d2: Vector3)
-            (o2: Matrix3x3)
+            (p1: Vector3) (d1: Vector3) (o1: Matrix3x3)
+            (p2: Vector3) (d2: Vector3) (o2: Matrix3x3)
             (cachedAxisIndex: int) =
-            let h1 = d1 / 2.0
-            let h2 = d2 / 2.0
-            let mutable delta = p1 - p2
-            WorldLimits.relative &delta
 
-            let c00 = Vector3.Dot(o1.R0, o2.R0)
-            let c01 = Vector3.Dot(o1.R0, o2.R1)
-            let c02 = Vector3.Dot(o1.R0, o2.R2)
-            let c10 = Vector3.Dot(o1.R1, o2.R0)
-            let c11 = Vector3.Dot(o1.R1, o2.R1)
-            let c12 = Vector3.Dot(o1.R1, o2.R2)
-            let c20 = Vector3.Dot(o1.R2, o2.R0)
-            let c21 = Vector3.Dot(o1.R2, o2.R1)
-            let c22 = Vector3.Dot(o1.R2, o2.R2)
-                        
-            let ac00 = abs c00 + EPSILON
-            let ac01 = abs c01 + EPSILON
-            let ac02 = abs c02 + EPSILON
-            let ac10 = abs c10 + EPSILON           
-            let ac11 = abs c11 + EPSILON
-            let ac12 = abs c12 + EPSILON
-            let ac20 = abs c20 + EPSILON
-            let ac21 = abs c21 + EPSILON
-            let ac22 = abs c22 + EPSILON
+            let mutable delta_d = p1 - p2
+            WorldLimits.relative &delta_d
 
-            let t_x = Vector3.Dot(delta, o1.R0)
-            let t_y = Vector3.Dot(delta, o1.R1)
-            let t_z = Vector3.Dot(delta, o1.R2)
+            let h1_f = MathF.toFloatV3 (d1 / 2.0)
+            let h2_f = MathF.toFloatV3 (d2 / 2.0)
+            let delta_f = MathF.toFloatV3 delta_d
+            let o1_f = MathF.toFloatM3 o1
+            let o2_f = MathF.toFloatM3 o2
+
+            let c00 = MathF.Vector3f.Dot(o1_f.R0, o2_f.R0)
+            let c01 = MathF.Vector3f.Dot(o1_f.R0, o2_f.R1)
+            let c02 = MathF.Vector3f.Dot(o1_f.R0, o2_f.R2)
+            let c10 = MathF.Vector3f.Dot(o1_f.R1, o2_f.R0)
+            let c11 = MathF.Vector3f.Dot(o1_f.R1, o2_f.R1)
+            let c12 = MathF.Vector3f.Dot(o1_f.R1, o2_f.R2)
+            let c20 = MathF.Vector3f.Dot(o1_f.R2, o2_f.R0)
+            let c21 = MathF.Vector3f.Dot(o1_f.R2, o2_f.R1)
+            let c22 = MathF.Vector3f.Dot(o1_f.R2, o2_f.R2)
+            
+            let ac00 = MathF.Abs c00 + EPSILON_F
+            let ac01 = MathF.Abs c01 + EPSILON_F
+            let ac02 = MathF.Abs c02 + EPSILON_F
+            let ac10 = MathF.Abs c10 + EPSILON_F
+            let ac11 = MathF.Abs c11 + EPSILON_F
+            let ac12 = MathF.Abs c12 + EPSILON_F
+            let ac20 = MathF.Abs c20 + EPSILON_F
+            let ac21 = MathF.Abs c21 + EPSILON_F
+            let ac22 = MathF.Abs c22 + EPSILON_F
+
+            let t_x = MathF.Vector3f.Dot(delta_f, o1_f.R0)
+            let t_y = MathF.Vector3f.Dot(delta_f, o1_f.R1)
+            let t_z = MathF.Vector3f.Dot(delta_f, o1_f.R2)
 
             let inline makeFullSAT() =
-                let mutable minPenetrationSq = Double.MaxValue
-                let mutable winningAxis = Vector3.Zero
+                let mutable minPenetrationSq = Single.MaxValue
+                let mutable winningAxis = MathF.Vector3f.Zero
                 let mutable winningAxisIndex = -1
                 let mutable areColliding = true
                 let mutable index = 0
@@ -510,11 +523,9 @@ module Engine =
                     let result =
                         testSingleAxis
                             index
-                            h1
-                            h2
-                            delta
-                            o1
-                            o2
+                            h1_f h2_f
+                            delta_f
+                            o1_f o2_f
                             ac00 ac01 ac02 ac10 ac11 ac12 ac20 ac21 ac22
                             t_x t_y t_z
 
@@ -526,28 +537,30 @@ module Engine =
                             minPenetrationSq <- result.PenetrationSq
                             winningAxis <- result.Axis
                             winningAxisIndex <- index
-                    
                     index <- index + 1
                 
                 if not <| areColliding then
                     struct(CollisionResult.NoCollision, winningAxisIndex)
                 else
-                    let finalDepth = sqrt minPenetrationSq
-                    let mag = sqrt (winningAxis.MagnitudeSq())
-                    let mutable normal = winningAxis / mag
+                    let finalDepth_d = float (MathF.Sqrt minPenetrationSq)
+                    let mag_f = winningAxis.Length()
+                    let mutable normal_f = winningAxis / mag_f
 
-                    if Vector3.Dot(normal, delta) < 0.0 then
-                        normal <- -normal
+                    if MathF.Vector3f.Dot(normal_f, delta_f) < 0.0f then
+                        normal_f <- -normal_f
                     
-                    struct(CollisionResult.Create(normal, finalDepth), winningAxisIndex)
+                    let normal_d = MathF.toDoubleV3 normal_f
+                    let result_d = CollisionResult.Create(normal_d, finalDepth_d)
+                    
+                    struct(result_d, winningAxisIndex)
                     
             if cachedAxisIndex <> -1 then
                 let fastPathResult =
                     testSingleAxis
                         cachedAxisIndex
-                        h1 h2
-                        delta
-                        o1 o2
+                        h1_f h2_f
+                        delta_f
+                        o1_f o2_f
                         ac00 ac01 ac02 ac10 ac11 ac12 ac20 ac21 ac22
                         t_x t_y t_z
                 
@@ -557,7 +570,7 @@ module Engine =
                     makeFullSAT()
             else
                 makeFullSAT()
-                    
+
         let inline checkCollisionSAT (p1: Vector3) (d1: Vector3) (o1: Matrix3x3) (p2: Vector3) (d2: Vector3) (o2: Matrix3x3) =
             let struct(result, _) = checkCollisionSATWithCachedAxis p1 d1 o1 p2 d2 o2 -1
             result   
@@ -1392,20 +1405,13 @@ module Engine =
                     OccupiedCells = cells 
                 }
         
-        let private areTransformsEqual (b1: inref<Body.T>) (b2: inref<BodyCacheEntry>) =
-            let inline areVectorsClose (v1: Vector3) (v2: Vector3) =
-                abs(v1.X - v2.X) < EPSILON
-                && abs(v1.Y - v2.Y) < EPSILON
-                && abs(v1.Z - v2.Z) < EPSILON
-
-            let inline areMatricesClose (m1: Matrix3x3) (m2: Matrix3x3) =
-                areVectorsClose m1.R0 m2.R0
-                && areVectorsClose m1.R1 m2.R1
-                && areVectorsClose m1.R2 m2.R2
-
-            areVectorsClose b1.Position b2.Position
-            && areVectorsClose b1.Dimensions b2.Dimensions
-            && areMatricesClose b1.Orientation b2.Orientation
+        let inline private areTransformsCloseEnough (b1: inref<Body.T>) (b2: inref<BodyCacheEntry>) =
+            let posDeltaSq = (b1.Position - b2.Position).MagnitudeSq()
+            if posDeltaSq > POSITION_THRESHOLD_SQ then
+                false
+            else
+                let orientDelta = Vector3.Dot(b1.Orientation.R0, b2.Orientation.R0)
+                orientDelta > ORIENTATION_THRESHOLD
         
         type Repo =
             private
@@ -1462,10 +1468,11 @@ module Engine =
             | true, idList -> idList.Span
             | false, _ -> Span<int>.Empty
 
-        let add(body: inref<Body.T>) buffers r =
+        let add(body: byref<Body.T>) buffers r =
             if r._bodyStateCache.ContainsKey body.Id then
                 r._logger.Warning("Body {BodyId} was already added into cache", body.Id)
             else
+                Body.updateAABB &body
                 let occupiedCells = new PooledList<uint64>()
                 Grid.fillOverlappingSubPrismsAABB
                     body.Position
@@ -1490,12 +1497,15 @@ module Engine =
                 r._bodyStateCache.Remove bodyId |> ignore
             | false, _ -> ()
 
-        let update (body: inref<Body.T>) buffers r=
+        let update (body: byref<Body.T>) buffers r =
             let cachedEntry = &CollectionsMarshal.GetValueRefOrNullRef(r._bodyStateCache, body.Id)
             match Unsafe.IsNullRef &cachedEntry with
             | true -> add &body buffers r
             | false ->
-                if not <| areTransformsEqual &body &cachedEntry then
+                if not <| areTransformsCloseEnough &body &cachedEntry then
+                    Body.updateAABB &body
+                    let oldOccupiedCells = cachedEntry.OccupiedCells
+
                     let newOccupiedCells = new PooledList<uint64>()
                     Grid.fillOverlappingSubPrismsAABB
                         body.Position
@@ -1503,8 +1513,7 @@ module Engine =
                         body.Orientation
                         buffers.UniquePrismsFilterBuffer
                         newOccupiedCells
-                    
-                    let oldOccupiedCells = cachedEntry.OccupiedCells
+
                     use newCellsSet = new PooledSet<uint64>(newOccupiedCells.Span)
 
                     for oldCell in oldOccupiedCells.Span do
@@ -1515,7 +1524,6 @@ module Engine =
                         r |> addBodyToCell body.Id newCell
 
                     oldOccupiedCells |> Dispose.action
-                    
                     cachedEntry <- BodyCacheEntry(&body, newOccupiedCells)
                     
     [<RequireQualifiedAccess>]
@@ -2378,7 +2386,6 @@ module Engine =
                     
                     for bodyId in island.BodiesSpan do
                         let body = &Body.getRef bodyId r._bodyRepo
-                        Body.updateAABB &body
                         SpatialHash.add &body buffers spatialHash
                         r._staticSupportCache.Remove bodyId |> ignore
                         
@@ -3799,7 +3806,6 @@ module Engine =
                 island.NextStep() 
                 for bodyId in island.BodiesSpan do
                     let body = &Body.getRef bodyId engine._bodyRepo
-                    Body.updateAABB &body
                     SpatialHash.update &body buffers engine._spatialHash
                     
                     if not <| body.IsFallingOver && not <| body.IsSnappedToGrid && body.IsGravityEnabled then
