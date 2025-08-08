@@ -384,6 +384,84 @@ module Engine =
                 else
                     axisOverlaps minA.Y maxA.Y minB.Y maxB.Y WorldLimits.Y
 
+        [<Struct; IsByRefLike; IsReadOnly>]
+        type private AxisTestResult =
+            val IsSeparating: bool
+            val PenetrationSq: double
+            val Axis: Vector3
+            new(isSeparating, penetrationSq, axis) =
+                {
+                    IsSeparating = isSeparating
+                    PenetrationSq = penetrationSq
+                    Axis = axis
+                }
+
+        let inline private testSingleAxis
+            (index: int)
+            (h1: Vector3)
+            (h2: Vector3)
+            (delta: Vector3)
+            (o1: Matrix3x3)
+            (o2: Matrix3x3)
+            (ac00: float)
+            (ac01: float)
+            (ac02: float)
+            (ac10: float)
+            (ac11: float)
+            (ac12: float)
+            (ac20: float)
+            (ac21: float)
+            (ac22: float)
+            (t_x: float)
+            (t_y: float)
+            (t_z: float) =
+
+            let mutable sep, R, axis, Lsq = 0.0, 0.0, Vector3.Zero, 1.0
+
+            match index with
+            | 0 -> sep <- abs t_x; R <- h1.X + h2.X * ac00 + h2.Y * ac01 + h2.Z * ac02; axis <- o1.R0
+            | 1 -> sep <- abs t_y; R <- h1.Y + h2.X * ac10 + h2.Y * ac11 + h2.Z * ac12; axis <- o1.R1
+            | 2 -> sep <- abs t_z; R <- h1.Z + h2.X * ac20 + h2.Y * ac21 + h2.Z * ac22; axis <- o1.R2
+
+            | 3 -> sep <- abs (Vector3.Dot(delta, o2.R0)); R <- h1.X * ac00 + h1.Y * ac10 + h1.Z * ac20 + h2.X; axis <- o2.R0
+            | 4 -> sep <- abs (Vector3.Dot(delta, o2.R1)); R <- h1.X * ac01 + h1.Y * ac11 + h1.Z * ac21 + h2.Y; axis <- o2.R1
+            | 5 -> sep <- abs (Vector3.Dot(delta, o2.R2)); R <- h1.X * ac02 + h1.Y * ac12 + h1.Z * ac22 + h2.Z; axis <- o2.R2
+
+            | 6 -> axis <- Vector3.Cross(o1.R0, o2.R0); Lsq <- axis.MagnitudeSq()
+            | 7 -> axis <- Vector3.Cross(o1.R0, o2.R1); Lsq <- axis.MagnitudeSq()
+            | 8 -> axis <- Vector3.Cross(o1.R0, o2.R2); Lsq <- axis.MagnitudeSq()
+            | 9 -> axis <- Vector3.Cross(o1.R1, o2.R0); Lsq <- axis.MagnitudeSq()
+            | 10 -> axis <- Vector3.Cross(o1.R1, o2.R1); Lsq <- axis.MagnitudeSq()
+            | 11 -> axis <- Vector3.Cross(o1.R1, o2.R2); Lsq <- axis.MagnitudeSq()
+            | 12 -> axis <- Vector3.Cross(o1.R2, o2.R0); Lsq <- axis.MagnitudeSq()
+            | 13 -> axis <- Vector3.Cross(o1.R2, o2.R1); Lsq <- axis.MagnitudeSq()
+            | 14 -> axis <- Vector3.Cross(o1.R2, o2.R2); Lsq <- axis.MagnitudeSq()
+            | _ -> ()
+
+            if Lsq > EPSILON_X2 then
+                if index > 5 then
+                    sep <- abs (Vector3.Dot(delta, axis))
+                    match index with
+                    | 6 -> R <- h1.Y * ac20 + h1.Z * ac10 + h2.Y * ac02 + h2.Z * ac01
+                    | 7 -> R <- h1.Y * ac21 + h1.Z * ac11 + h2.X * ac02 + h2.Z * ac00
+                    | 8 -> R <- h1.Y * ac22 + h1.Z * ac12 + h2.X * ac01 + h2.Y * ac00
+                    | 9 -> R <- h1.X * ac20 + h1.Z * ac00 + h2.Y * ac12 + h2.Z * ac11
+                    | 10 -> R <- h1.X * ac21 + h1.Z * ac01 + h2.X * ac12 + h2.Z * ac10
+                    | 11 -> R <- h1.X * ac22 + h1.Z * ac02 + h2.X * ac11 + h2.Y * ac10
+                    | 12 -> R <- h1.X * ac10 + h1.Y * ac00 + h2.Y * ac22 + h2.Z * ac21
+                    | 13 -> R <- h1.X * ac11 + h1.Y * ac01 + h2.X * ac22 + h2.Z * ac20
+                    | 14 -> R <- h1.X * ac12 + h1.Y * ac02 + h2.X * ac21 + h2.Y * ac20
+                    | _ -> ()
+
+                if sep > R then
+                    AxisTestResult(true, 0.0, Vector3.Zero)
+                else
+                    let pen = R - sep
+                    let penetrationSq = (pen * pen) / Lsq
+                    AxisTestResult(false, penetrationSq, axis)
+            else
+                AxisTestResult(false, Double.MaxValue, Vector3.Zero)
+                
         let checkCollisionSATWithCachedAxis
             (p1: Vector3)
             (d1: Vector3)
@@ -392,110 +470,97 @@ module Engine =
             (d2: Vector3)
             (o2: Matrix3x3)
             (cachedAxisIndex: int) =
-            let inline getAxisByIndex index =
-                match index with
-                | 0 -> o1.R0
-                | 1 -> o1.R1
-                | 2 -> o1.R2
-                | 3 -> o2.R0
-                | 4 -> o2.R1
-                | 5 -> o2.R2
-                | 6 -> Vector3.Cross(o1.R0, o2.R0)
-                | 7 -> Vector3.Cross(o1.R0, o2.R1)
-                | 8 -> Vector3.Cross(o1.R0, o2.R2)
-                | 9 -> Vector3.Cross(o1.R1, o2.R0)
-                | 10 -> Vector3.Cross(o1.R1, o2.R1)
-                | 11 -> Vector3.Cross(o1.R1, o2.R2)
-                | 12 -> Vector3.Cross(o1.R2, o2.R0)
-                | 13 -> Vector3.Cross(o1.R2, o2.R1)
-                | 14 -> Vector3.Cross(o1.R2, o2.R2)
-                | _ -> Vector3.Zero
-            
             let h1 = d1 / 2.0
             let h2 = d2 / 2.0
-
             let mutable delta = p1 - p2
             WorldLimits.relative &delta
-            
-            let mutable minPenetration = Double.MaxValue
-            let mutable mtvAxis = Vector3.Zero
-            let mutable colliding = true
-            let mutable winningAxisIndex = -1
 
-            let inline testAxis (axis: Vector3) (axisIndex: int) =
-                if axis.MagnitudeSq() > EPSILON then
-                    let radius1 =
-                        abs (Vector3.Dot(o1.R0, axis)) * h1.X
-                        + abs (Vector3.Dot(o1.R1, axis)) * h1.Y
-                        + abs (Vector3.Dot(o1.R2, axis)) * h1.Z
+            let c00 = Vector3.Dot(o1.R0, o2.R0)
+            let c01 = Vector3.Dot(o1.R0, o2.R1)
+            let c02 = Vector3.Dot(o1.R0, o2.R2)
+            let c10 = Vector3.Dot(o1.R1, o2.R0)
+            let c11 = Vector3.Dot(o1.R1, o2.R1)
+            let c12 = Vector3.Dot(o1.R1, o2.R2)
+            let c20 = Vector3.Dot(o1.R2, o2.R0)
+            let c21 = Vector3.Dot(o1.R2, o2.R1)
+            let c22 = Vector3.Dot(o1.R2, o2.R2)
+                        
+            let ac00 = abs c00 + EPSILON
+            let ac01 = abs c01 + EPSILON
+            let ac02 = abs c02 + EPSILON
+            let ac10 = abs c10 + EPSILON           
+            let ac11 = abs c11 + EPSILON
+            let ac12 = abs c12 + EPSILON
+            let ac20 = abs c20 + EPSILON
+            let ac21 = abs c21 + EPSILON
+            let ac22 = abs c22 + EPSILON
 
-                    let radius2 =
-                        abs (Vector3.Dot(o2.R0, axis)) * h2.X
-                        + abs (Vector3.Dot(o2.R1, axis)) * h2.Y
-                        + abs (Vector3.Dot(o2.R2, axis)) * h2.Z
+            let t_x = Vector3.Dot(delta, o1.R0)
+            let t_y = Vector3.Dot(delta, o1.R1)
+            let t_z = Vector3.Dot(delta, o1.R2)
 
-                    let p1CenterProj = Vector3.Dot(delta, axis)
+            let inline makeFullSAT() =
+                let mutable minPenetrationSq = Double.MaxValue
+                let mutable winningAxis = Vector3.Zero
+                let mutable winningAxisIndex = -1
+                let mutable areColliding = true
+                let mutable index = 0
 
-                    let p1Min = p1CenterProj - radius1
-                    let p1Max = p1CenterProj + radius1
-                    let p2Min = -radius2
-                    let p2Max = radius2
+                while areColliding && index < 15 do
+                    let result =
+                        testSingleAxis
+                            index
+                            h1
+                            h2
+                            delta
+                            o1
+                            o2
+                            ac00 ac01 ac02 ac10 ac11 ac12 ac20 ac21 ac22
+                            t_x t_y t_z
 
-                    let overlap = (min p1Max p2Max) - (max p1Min p2Min)
-
-                    if overlap < 0.0 then
-                        colliding <- false
-                        winningAxisIndex <- axisIndex 
+                    if result.IsSeparating then
+                        areColliding <- false
+                        winningAxisIndex <- index
                     else
-                        if overlap < minPenetration then
-                            minPenetration <- overlap
-                            mtvAxis <- axis
-                            winningAxisIndex <- axisIndex
-
-            if cachedAxisIndex <> -1 then
-                let cachedAxis = getAxisByIndex cachedAxisIndex
-                testAxis cachedAxis cachedAxisIndex
-
-            if not <| colliding then
-                struct(CollisionResult.NoCollision, cachedAxisIndex)
-            else
-                testAxis o1.R0 0
+                        if result.PenetrationSq < minPenetrationSq then
+                            minPenetrationSq <- result.PenetrationSq
+                            winningAxis <- result.Axis
+                            winningAxisIndex <- index
+                    
+                    index <- index + 1
                 
-                if colliding then testAxis o1.R1 1
-                if colliding then testAxis o1.R2 2
-                if colliding then testAxis o2.R0 3
-                if colliding then testAxis o2.R1 4
-                if colliding then testAxis o2.R2 5
+                if not <| areColliding then
+                    struct(CollisionResult.NoCollision, winningAxisIndex)
+                else
+                    let finalDepth = sqrt minPenetrationSq
+                    let mag = sqrt (winningAxis.MagnitudeSq())
+                    let mutable normal = winningAxis / mag
 
-                let inline testCrossProduct(axisA: Vector3) (axisB: Vector3) (axisIndex: int) =
-                    if colliding && abs(Vector3.Dot(axisA, axisB)) < 1.0 - EPSILON then
-                        let crossAxis = Vector3.Cross(axisA, axisB)
-                        testAxis (crossAxis.Normalize()) axisIndex
-                
-                if colliding then
-                    testCrossProduct o1.R0 o2.R0 6
-                    testCrossProduct o1.R0 o2.R1 7
-                    testCrossProduct o1.R0 o2.R2 8
-                    testCrossProduct o1.R1 o2.R0 9
-                    testCrossProduct o1.R1 o2.R1 10
-                    testCrossProduct o1.R1 o2.R2 11
-                    testCrossProduct o1.R2 o2.R0 12
-                    testCrossProduct o1.R2 o2.R1 13
-                    testCrossProduct o1.R2 o2.R2 14
-
-                    let mutable normal = mtvAxis.Normalize()
                     if Vector3.Dot(normal, delta) < 0.0 then
                         normal <- -normal
-                    let result = CollisionResult.Create(normal, minPenetration)
                     
-                    struct(result, winningAxisIndex)
+                    struct(CollisionResult.Create(normal, finalDepth), winningAxisIndex)
+                    
+            if cachedAxisIndex <> -1 then
+                let fastPathResult =
+                    testSingleAxis
+                        cachedAxisIndex
+                        h1 h2
+                        delta
+                        o1 o2
+                        ac00 ac01 ac02 ac10 ac11 ac12 ac20 ac21 ac22
+                        t_x t_y t_z
+                
+                if fastPathResult.IsSeparating then
+                    struct(CollisionResult.NoCollision, cachedAxisIndex)
                 else
-                    struct(CollisionResult.NoCollision, winningAxisIndex)
+                    makeFullSAT()
+            else
+                makeFullSAT()
                     
         let inline checkCollisionSAT (p1: Vector3) (d1: Vector3) (o1: Matrix3x3) (p2: Vector3) (d2: Vector3) (o2: Matrix3x3) =
             let struct(result, _) = checkCollisionSATWithCachedAxis p1 d1 o1 p2 d2 o2 -1
-            result
-    
+            result   
     
     [<RequireQualifiedAccess>]
     module Body =
@@ -1986,44 +2051,40 @@ module Engine =
         let getIslandIdForBody bodyId r = r._bodyToIslandMap[bodyId]
         let getIslandRef islandId r = &CollectionsMarshal.GetValueRefOrNullRef(r._allIslands, islandId)
         
-        let private calculateOccupiedCells (island: inref<T>) (cellSize: double) (buffer: PooledList<uint64>) =
+        let private calculateOccupiedCells (minCorner: Vector3) (maxCorner: Vector3) (cellSize: double) (buffer: PooledList<uint64>) =
             buffer.Clear()
-            if island.BodiesSpan.Length > 0 then
-                let minCorner = island.MinAABB
-                let maxCorner = island.MaxAABB
-                
-                let gridCellsX = IslandGridPhase.worldToGridCoord WorldLimits.X cellSize
-                let gridCellsY = IslandGridPhase.worldToGridCoord WorldLimits.Y cellSize
+            let gridCellsX = IslandGridPhase.worldToGridCoord WorldLimits.X cellSize
+            let gridCellsY = IslandGridPhase.worldToGridCoord WorldLimits.Y cellSize
 
-                let minGridX = IslandGridPhase.worldToGridCoord minCorner.X cellSize
-                let maxGridX = IslandGridPhase.worldToGridCoord maxCorner.X cellSize
-                let minGridY = IslandGridPhase.worldToGridCoord minCorner.Y cellSize
-                let maxGridY = IslandGridPhase.worldToGridCoord maxCorner.Y cellSize
- 
-                let inline addKey (gx: int) (gy: int) =
-                    let wrappedGx = (gx % gridCellsX + gridCellsX) % gridCellsX
-                    let wrappedGy = (gy % gridCellsY + gridCellsY) % gridCellsY
-                    let key = IslandGridPhase.packKey wrappedGx wrappedGy
-                    buffer.Add key
+            let minGridX = IslandGridPhase.worldToGridCoord minCorner.X cellSize
+            let maxGridX = IslandGridPhase.worldToGridCoord maxCorner.X cellSize
+            let minGridY = IslandGridPhase.worldToGridCoord minCorner.Y cellSize
+            let maxGridY = IslandGridPhase.worldToGridCoord maxCorner.Y cellSize
 
-                let inline processYRange (gx: int) =
-                    if minGridY <= maxGridY then
-                        for gy = minGridY to maxGridY do
-                            addKey gx gy
-                    else
-                        for gy = minGridY to gridCellsY - 1 do
-                            addKey gx gy
-                        for gy = 0 to maxGridY do
-                            addKey gx gy
+            let inline addKey (gx: int) (gy: int) =
+                let wrappedGx = (gx % gridCellsX + gridCellsX) % gridCellsX
+                let wrappedGy = (gy % gridCellsY + gridCellsY) % gridCellsY
+                let key = IslandGridPhase.packKey wrappedGx wrappedGy
+                buffer.Add key
 
-                if minGridX <= maxGridX then
-                    for gx = minGridX to maxGridX do
-                        processYRange gx
+            let inline processYRange (gx: int) =
+                if minGridY <= maxGridY then
+                    for gy = minGridY to maxGridY do
+                        addKey gx gy
                 else
-                    for gx = minGridX to gridCellsX - 1 do
-                        processYRange gx
-                    for gx = 0 to maxGridX do
-                        processYRange gx
+                    for gy = minGridY to gridCellsY - 1 do
+                        addKey gx gy
+                    for gy = 0 to maxGridY do
+                        addKey gx gy
+
+            if minGridX <= maxGridX then
+                for gx = minGridX to maxGridX do
+                    processYRange gx
+            else
+                for gx = minGridX to gridCellsX - 1 do
+                    processYRange gx
+                for gx = 0 to maxGridX do
+                    processYRange gx
         
         let queryIslandsByAABB 
             (minAABB: Vector3) 
@@ -2035,11 +2096,7 @@ module Engine =
             resultSet.Clear()
             tempBuffer.Clear()
     
-            use mutable tempIsland = new T(0)
-            tempIsland.MinAABB <- minAABB
-            tempIsland.MaxAABB <- maxAABB
-
-            calculateOccupiedCells &tempIsland r._gridCellSize tempBuffer
+            calculateOccupiedCells minAABB maxAABB r._gridCellSize tempBuffer
 
             for cellKey in tempBuffer.Span do
                 match r._islandGrid.TryGetValue cellKey with
@@ -2062,7 +2119,8 @@ module Engine =
         let private addIslandToGrid (island: byref<T>) r =
             let islandId = island.Id
             let tempBuffer = island.OccupiedGridCells
-            calculateOccupiedCells &island r._gridCellSize tempBuffer
+            
+            calculateOccupiedCells island.MinAABB island.MaxAABB r._gridCellSize tempBuffer
             
             for cellKey in tempBuffer.Span do
                 let mutable isListExists = false
@@ -2074,7 +2132,8 @@ module Engine =
 
         let private updateIslandInGrid (island: byref<T>) r =
             r._newOccupiedCellsBuffer.Clear()
-            calculateOccupiedCells &island r._gridCellSize r._newOccupiedCellsBuffer
+            
+            calculateOccupiedCells island.MinAABB island.MaxAABB r._gridCellSize r._newOccupiedCellsBuffer
 
             r._newCellsFilter.Clear()
             for newCell in r._newOccupiedCellsBuffer.Span do
@@ -2532,13 +2591,13 @@ module Engine =
                                     
             isFree
 
-        [<Struct>]
+        [<Struct; IsReadOnly>]
         type private VectorDistanceComparer(referencePoint: Vector3) =
             interface IComparer<Vector3> with
                 member _.Compare(p1, p2) =
                     let distSq1 = (p1 - referencePoint).MagnitudeSq()
                     let distSq2 = (p2 - referencePoint).MagnitudeSq()
-                    distSq1.CompareTo(distSq2)
+                    distSq1.CompareTo distSq2
             
         let trySnapToGridCollisionAware
             (body: byref<Body.T>)
