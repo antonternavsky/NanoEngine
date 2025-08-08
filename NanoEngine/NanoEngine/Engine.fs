@@ -723,7 +723,7 @@ module Engine =
                     let struct(orient, dims) = _precomputedPrismShapes[i % 6]
                     Collision.getAABB Vector3.Zero dims orient
             |]
-            
+        
         let private _vertexes =
             [|
                 Vector3(HEX_RADIUS * cos (double 0 * PI / 3.0), HEX_RADIUS * sin (double 0 * PI / 3.0), 0.0)
@@ -734,6 +734,14 @@ module Engine =
                 Vector3(HEX_RADIUS * cos (double 5 * PI / 3.0), HEX_RADIUS * sin (double 5 * PI / 3.0), 0.0)
             |]
     
+        let private _precomputedPrismBaseOffsets =
+            [|
+                for sector in 0..5 ->
+                    let v2_rel = _vertexes[sector]
+                    let v3_rel = _vertexes[(sector + 1) % 6]
+                    (v2_rel + v3_rel) / 3.0
+            |]
+        
         let inline convertWorldToFractionalAxial worldX worldY =
             let r_approx = worldY / (HEX_RADIUS * 1.5)
             let r = r_approx
@@ -807,14 +815,10 @@ module Engine =
         let getTriangularPrismCenter (coords: SubPrismCoords)=
             let hexCenter = convertHexToWorld coords.Q coords.R 0 0.0
             let sector = coords.SubIndex % 6
-
-            let v1 = hexCenter
-            let v2 = hexCenter + _vertexes[sector]
-            let v3 = hexCenter + _vertexes[(sector + 1) % 6]
-
-            let baseCenter = (v1 + v2 + v3) / 3.0
+ 
+            let baseCenter = hexCenter + _precomputedPrismBaseOffsets[sector]
+            
             let zPos = HEX_HEIGHT * (double coords.Z + (if coords.SubIndex < 6 then 0.25 else 0.75))
-
             Vector3(baseCenter.X, baseCenter.Y, zPos)
 
         let createPrismSpace (coords: SubPrismCoords) =
