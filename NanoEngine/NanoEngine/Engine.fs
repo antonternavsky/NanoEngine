@@ -2,6 +2,7 @@
 #nowarn "9"
 #nowarn "3391"
 
+open System.Diagnostics
 open System.Runtime.CompilerServices
 open System.Runtime.InteropServices
 open Collections.Pooled
@@ -1526,9 +1527,115 @@ module Engine =
 
                     oldOccupiedCells |> Dispose.action
                     cachedEntry <- BodyCacheEntry(&body, newOccupiedCells)
-                    
+    
+    [<RequireQualifiedAccess>]
+    module DSU =
+        [<Struct>]
+        type T =
+            private
+                {
+                    _mapIdToIndex: PooledDictionary<int, int>
+                    _mapIndexToId: int[]
+                    _parent: int[]
+                    _size: int[]
+                    mutable _componentCount: int
+                }
+
+            member this.Dispose() =
+                this._mapIdToIndex.Dispose()
+
+            interface IDisposable with
+                member this.Dispose() = this.Dispose()
+
+            member private this.FindRootIndex itemIndex =
+                let mutable root = itemIndex
+                let parent = this._parent.AsSpan()
+                while root <> parent[root] do
+                    root <- parent[root]
+
+                let mutable current = itemIndex
+                while current <> root do
+                    let next = parent[current]
+                    parent[current] <- root
+                    current <- next
+                root
+
+            member this.Find itemId =
+                match this._mapIdToIndex.TryGetValue itemId with
+                | true, index -> this._mapIndexToId[this.FindRootIndex index]
+                | false, _ ->
+                    // Should not happen if DSU is used correctly
+                    itemId
+
+            member this.Union(id1, id2) =
+                match this._mapIdToIndex.TryGetValue id1 with
+                | false, _ -> ()
+                | true, index1 ->
+                    match this._mapIdToIndex.TryGetValue id2 with
+                    | false, _ -> ()
+                    | true, index2 ->
+                        let root1 = this.FindRootIndex index1
+                        let root2 = this.FindRootIndex index2
+                        
+                        let parent = this._parent.AsSpan()
+                        let size = this._size.AsSpan()
+                        
+                        if root1 <> root2 then
+                            if size[root1] < size[root2] then
+                                parent[root1] <- root2
+                                size[root2] <- size[root2] + size[root1]
+                            else
+                                parent[root2] <- root1
+                                size[root1] <- size[root1] + size[root2]
+
+                            this._componentCount <- this._componentCount - 1
+
+            member this.ComponentCount = this._componentCount
+
+            member this.GetAllComponents() =
+                use components = new PooledDictionary<int, PooledList<int>>()
+                for id in this._mapIdToIndex.Keys do
+                    let rootId = this.Find id
+                    let list =
+                        match components.TryGetValue rootId with
+                        | true, list -> list
+                        | false, _ ->
+                            let newList = new PooledList<int>()
+                            components.Add(rootId, newList)
+                            newList
+                    list.Add id
+
+                let result = new PooledList<PooledList<int>>(components.Count)
+                for componentList in components.Values do
+                    result.Add componentList
+                result
+                
+        let create(ids: ReadOnlySpan<int>) =
+            let count = ids.Length
+            let mapIdToIndex = new PooledDictionary<int, int>(count)
+            let mapIndexToId = Array.zeroCreate<int> count
+            let parent = Array.zeroCreate<int> count
+            let size = Array.zeroCreate<int> count
+
+            for i = 0 to count - 1 do
+                let id = ids[i]
+                mapIdToIndex.Add(id, i)
+                mapIndexToId[i] <- id
+                parent[i] <- i
+                size[i] <- 1
+
+            {
+                _mapIdToIndex = mapIdToIndex
+                _mapIndexToId = mapIndexToId
+                _parent = parent
+                _size = size
+                _componentCount = count
+            }
+                
     [<RequireQualifiedAccess>]
     module Island =
+        
+        let [<Literal>] private GROUND_NODE_ID = Int32.MinValue
         
         [<Struct; IsReadOnly; StructLayout(LayoutKind.Sequential, Pack = 1)>]
         type ContactData =
@@ -1876,6 +1983,9 @@ module Engine =
                     maxExtents.Y <- max maxExtents.Y deltaMax.Y
                     maxExtents.Z <- max maxExtents.Z deltaMax.Z
 
+                Debug.Assert(((maxExtents.X - minExtents.X) < (WorldLimits.X * 0.9)), "Island AABB exceeds world size limit on X-axis")
+                Debug.Assert(((maxExtents.Y - minExtents.Y) < (WorldLimits.Y * 0.9)), "Island AABB exceeds world size limit on Y-axis")
+                
                 island.MinAABB <- centroid + minExtents
                 island.MaxAABB <- centroid + maxExtents
                 
@@ -1946,19 +2056,16 @@ module Engine =
         let private findConnectedComponents
             (bodiesToAnalyze: ReadOnlySpan<int>)
             (island: inref<T>) =
-            use adjacencyMap = buildAdjacencyMap bodiesToAnalyze (island.GetContactKeys())
-            let result = new PooledList<PooledList<int>>()
-            use visited = new PooledSet<int>()
+            use dsu = DSU.create bodiesToAnalyze
 
-            for bodyId in bodiesToAnalyze do
-                let newComponent = findSingleConnectedComponent bodyId adjacencyMap visited
-                if newComponent.Count > 0 then
-                    result.Add newComponent
-                else
-                    newComponent |> Dispose.action
-                    
-            adjacencyMap.Values |> Seq.iter Dispose.action
-            result
+            for contactKey in island.GetContactKeys() do
+                let struct(id1, id2) = ContactKey.unpack contactKey
+                dsu.Union(id1, id2)
+
+            if dsu.ComponentCount <= 1 then
+                new PooledList<PooledList<int>>()
+            else
+                dsu.GetAllComponents()
         
         let private hasStaticSupport
             (body: inref<Body.T>)
@@ -2012,51 +2119,41 @@ module Engine =
             if island.IsGroundedCacheValid then
                 island.IsGrounded
             else
-                if island.BodiesSpan.Length = 0 then
+                let bodiesSpan = island.BodiesSpan
+                if bodiesSpan.Length = 0 then
                     island.IsGrounded <- true
                     island.IsGroundedCacheValid <- true
-                elif island.BodiesSpan.Length = 1 then
-                    let bodyId = island.BodiesSpan[0]
+                elif bodiesSpan.Length = 1 then
+                    let bodyId = bodiesSpan[0]
                     let body = &Body.getRef bodyId bodyRepo
 
                     island.IsGrounded <- hasStaticSupport &body spatialHash geometryRepo r
                     island.IsGroundedCacheValid <- true 
                 else
-                    use anchors = new PooledList<int>()
-                    for bodyId in island.BodiesSpan do
+                    use bodyIdsWithGround = new PooledList<int>(bodiesSpan)
+                    bodyIdsWithGround.Add GROUND_NODE_ID
+                    use dsu = DSU.create bodyIdsWithGround.Span
+
+                    for bodyId in bodiesSpan do
                         let body = &Body.getRef bodyId bodyRepo
-                        if not <| Unsafe.IsNullRef &body then
-                            if hasStaticSupport &body spatialHash geometryRepo r then
-                                anchors.Add bodyId
+                        if hasStaticSupport &body spatialHash geometryRepo r then
+                            dsu.Union(bodyId, GROUND_NODE_ID)
 
-                    if anchors.Count = 0 then
-                        island.IsGrounded <- false
-                        island.IsGroundedCacheValid <- true
-                    elif anchors.Count = island.BodiesSpan.Length then
-                        island.IsGrounded <- true
-                        island.IsGroundedCacheValid <- true
-                    else
-                        use adjacencyMap = buildAdjacencyMap island.BodiesSpan (island.GetContactKeys())
-                        use visited = new PooledSet<int>()
-                        use queue = new PooledQueue<int>()
-                        
-                        for anchorId in anchors.Span do
-                            if visited.Add anchorId then
-                                queue.Enqueue anchorId
+                    for contactKey in island.GetContactKeys() do
+                        let struct(id1, id2) = ContactKey.unpack contactKey
+                        dsu.Union(id1, id2)
 
-                        while queue.Count > 0 do
-                            let currentId = queue.Dequeue()
-                            match adjacencyMap.TryGetValue currentId with
-                            | true, a ->
-                                for neighborId in a.Span do
-                                    if visited.Add neighborId then
-                                        queue.Enqueue neighborId
-                            | _ -> ()
-                        
-                        island.IsGrounded <- visited.Count = island.BodiesSpan.Length
-                        island.IsGroundedCacheValid <- true
-                                                
-                        adjacencyMap.Values |> Seq.iter Dispose.action
+                    let groundRoot = dsu.Find GROUND_NODE_ID
+                    let mutable allGrounded = true
+                    let mutable i = 0
+                    while allGrounded && i < bodiesSpan.Length do
+                        let bodyId = bodiesSpan[i]
+                        if dsu.Find bodyId <> groundRoot then
+                            allGrounded <- false
+                        i <- i + 1
+
+                    island.IsGrounded <- allGrounded
+                    island.IsGroundedCacheValid <- true
                         
                 island.IsGrounded
     
