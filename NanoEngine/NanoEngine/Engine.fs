@@ -420,8 +420,14 @@ module Engine =
             val IsSeparating: bool
             val PenetrationSq: float32
             val Axis: MathF.Vector3f
-            new(isSeparating, penetrationSq, axis) =
-                { IsSeparating = isSeparating; PenetrationSq = penetrationSq; Axis = axis }
+            val IsValidAxis: bool
+            new(isSeparating, penetrationSq, axis, isValidAxis) =
+                {
+                    IsSeparating = isSeparating
+                    PenetrationSq = penetrationSq
+                    Axis = axis
+                    IsValidAxis = isValidAxis
+                }
 
         let inline private testSingleAxis
             (index: int)
@@ -468,13 +474,13 @@ module Engine =
                     | _ -> ()
 
                 if sep > R then
-                    AxisTestResultF(true, 0.0f, MathF.Vector3f.Zero)
+                    AxisTestResultF(true, 0.0f, MathF.Vector3f.Zero, true)
                 else
                     let pen = R - sep
                     let penetrationSq = (pen * pen) / Lsq
-                    AxisTestResultF(false, penetrationSq, axis)
+                    AxisTestResultF(false, penetrationSq, axis, true)
             else
-                AxisTestResultF(false, Single.MaxValue, MathF.Vector3f.Zero)
+                AxisTestResultF(false, Single.MaxValue, MathF.Vector3f.Zero, false)
 
         let checkCollisionSATWithCachedAxis
             (p1: Vector3) (d1: Vector3) (o1: Matrix3x3)
@@ -531,14 +537,15 @@ module Engine =
                             ac00 ac01 ac02 ac10 ac11 ac12 ac20 ac21 ac22
                             t_x t_y t_z
 
-                    if result.IsSeparating then
-                        areColliding <- false
-                        winningAxisIndex <- index
-                    else
-                        if result.PenetrationSq < minPenetrationSq then
-                            minPenetrationSq <- result.PenetrationSq
-                            winningAxis <- result.Axis
+                    if result.IsValidAxis then
+                        if result.IsSeparating then
+                            areColliding <- false
                             winningAxisIndex <- index
+                        else
+                            if result.PenetrationSq < minPenetrationSq then
+                                minPenetrationSq <- result.PenetrationSq
+                                winningAxis <- result.Axis
+                                winningAxisIndex <- index
                     index <- index + 1
                 
                 if not <| areColliding then
@@ -555,7 +562,7 @@ module Engine =
                     let result_d = CollisionResult.Create(normal_d, finalDepth_d)
                     
                     struct(result_d, winningAxisIndex)
-                    
+
             if cachedAxisIndex <> -1 then
                 let fastPathResult =
                     testSingleAxis
@@ -566,7 +573,7 @@ module Engine =
                         ac00 ac01 ac02 ac10 ac11 ac12 ac20 ac21 ac22
                         t_x t_y t_z
                 
-                if fastPathResult.IsSeparating then
+                if fastPathResult.IsSeparating || not <| fastPathResult.IsValidAxis then
                     struct(CollisionResult.NoCollision, cachedAxisIndex)
                 else
                     makeFullSAT()
