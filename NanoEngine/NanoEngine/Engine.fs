@@ -95,8 +95,7 @@ module Engine =
             if mSq < EPSILON_X2 then
                 Vector3.Zero
             else
-                let m = sqrt mSq
-                this / m
+                this * (1.0 / (sqrt mSq))
 
     
     let GRAVITY = Vector3(0.0, 0.0, -9.8)
