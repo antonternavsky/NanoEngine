@@ -1530,16 +1530,15 @@ module Engine =
     
     [<RequireQualifiedAccess>]
     module DSU =
-        [<Struct>]
+        [<Struct; IsByRefLike>]
         type T =
-            private
-                {
-                    _mapIdToIndex: PooledDictionary<int, int>
-                    _mapIndexToId: int[]
-                    _parent: int[]
-                    _size: int[]
-                    mutable _componentCount: int
-                }
+            {
+                _mapIdToIndex: PooledDictionary<int, int>
+                _mapIndexToId: Span<int>
+                _parent: Span<int>
+                _size: Span<int>
+                mutable _componentCount: int
+            }
 
             member this.Dispose() =
                 this._mapIdToIndex.Dispose()
@@ -1549,14 +1548,13 @@ module Engine =
 
             member private this.FindRootIndex itemIndex =
                 let mutable root = itemIndex
-                let parent = this._parent.AsSpan()
-                while root <> parent[root] do
-                    root <- parent[root]
+                while root <> this._parent[root] do
+                    root <- this._parent[root]
 
                 let mutable current = itemIndex
                 while current <> root do
-                    let next = parent[current]
-                    parent[current] <- root
+                    let next = this._parent[current]
+                    this._parent[current] <- root
                     current <- next
                 root
 
@@ -1576,30 +1574,27 @@ module Engine =
                     | true, index2 ->
                         let root1 = this.FindRootIndex index1
                         let root2 = this.FindRootIndex index2
-                        
-                        let parent = this._parent.AsSpan()
-                        let size = this._size.AsSpan()
-                        
+
                         if root1 <> root2 then
-                            if size[root1] < size[root2] then
-                                parent[root1] <- root2
-                                size[root2] <- size[root2] + size[root1]
+                            if this._size[root1] < this._size[root2] then
+                                this._parent[root1] <- root2
+                                this._size[root2] <- this._size[root2] + this._size[root1]
                             else
-                                parent[root2] <- root1
-                                size[root1] <- size[root1] + size[root2]
+                                this._parent[root2] <- root1
+                                this._size[root1] <- this._size[root1] + this._size[root2]
 
                             this._componentCount <- this._componentCount - 1
 
             member this.ComponentCount = this._componentCount
 
             member this.GetAllComponents() =
-                let mapIndexToId = this._mapIndexToId.AsSpan()
+                let mapIndexToId = this._mapIndexToId
                 let result = new PooledList<PooledList<int>>()
                 use rootMap = new PooledDictionary<int, PooledList<int>>()
 
                 for i = 0 to mapIndexToId.Length - 1 do
                     let id = mapIndexToId[i]
-                    let rootIndex = this.FindRootIndex(i)
+                    let rootIndex = this.FindRootIndex i
                     let rootId = mapIndexToId[rootIndex]
 
                     match rootMap.TryGetValue rootId with
@@ -1611,14 +1606,14 @@ module Engine =
                         result.Add newList
                 result
                 
-        let create(ids: ReadOnlySpan<int>) =
-            let count = ids.Length
-            let mapIdToIndex = new PooledDictionary<int, int>(count)
-            let mapIndexToId = Array.zeroCreate<int> count
-            let parent = Array.zeroCreate<int> count
-            let size = Array.zeroCreate<int> count
+        // Don't remove inline, otherwise the stack working will break
+        let inline create(ids: ReadOnlySpan<int>) =
+            let mapIdToIndex = new PooledDictionary<int, int>(ids.Length)
+            let mapIndexToId = Stack.alloc ids.Length
+            let parent = Stack.alloc ids.Length
+            let size = Stack.alloc ids.Length
 
-            for i = 0 to count - 1 do
+            for i = 0 to ids.Length - 1 do
                 let id = ids[i]
                 mapIdToIndex.Add(id, i)
                 mapIndexToId[i] <- id
@@ -1630,7 +1625,7 @@ module Engine =
                 _mapIndexToId = mapIndexToId
                 _parent = parent
                 _size = size
-                _componentCount = count
+                _componentCount = ids.Length
             }
                 
     [<RequireQualifiedAccess>]
