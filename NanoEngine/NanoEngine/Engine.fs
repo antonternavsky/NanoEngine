@@ -42,7 +42,11 @@ module Engine =
     let [<Literal>] FRAMES_TO_UNROOT = 2
     let [<Literal>] POSITION_THRESHOLD_SQ = (HEX_RADIUS * 0.04) * (HEX_RADIUS * 0.04)
     let [<Literal>] ORIENTATION_THRESHOLD = 0.9998 // cos(1.14 градуса)
-            
+    let [<Literal>] STATIC_BODY_MASS = 1e12
+    
+    let inline safeMass invMass =
+        if invMass > EPSILON then 1.0 / invMass else STATIC_BODY_MASS
+    
     [<RequireQualifiedAccess>]
     module Dispose =
         let inline action(a: #IDisposable) =
@@ -864,41 +868,42 @@ module Engine =
             let mutable rawMinZ, rawMaxZ = Int32.MaxValue, Int32.MinValue
             
             for i = 0 to corners.Length - 1 do
-                let struct(rawQ, rawR, rawZ) = corners[i] |> convertWorldToRawGridCoords 
-                rawMinQ <- min rawMinQ rawQ
-                rawMaxQ <- max rawMaxQ rawQ
-                rawMinR <- min rawMinR rawR
-                rawMaxR <- max rawMaxR rawR
-                rawMinZ <- min rawMinZ rawZ
-                rawMaxZ <- max rawMaxZ rawZ
+                let struct(rawQ, rawR, rawZ) = corners[i] |> convertWorldToRawGridCoords
+                if rawQ < rawMinQ then rawMinQ <- rawQ
+                if rawQ > rawMaxQ then rawMaxQ <- rawQ
+                if rawR < rawMinR then rawMinR <- rawR
+                if rawR > rawMaxR then rawMaxR <- rawR
+                if rawZ < rawMinZ then rawMinZ <- rawZ
+                if rawZ > rawMaxZ then rawMaxZ <- rawZ
+
+            let inline checkAndAddSubPrisms q r z startIndex endIndex =
+                for sub_idx = startIndex to endIndex do
+                    let subPrismCoords = SubPrismCoords.Normalize(q, r, z, sub_idx)
+                    let struct(minPrism, maxPrism) = getTriangularPrismAABB subPrismCoords
+                    if Collision.checkCollisionAABB minAABB maxAABB minPrism maxPrism then
+                        let key = SubPrismKey.pack subPrismCoords
+                        filter.Add key |> ignore
 
             for q = rawMinQ to rawMaxQ do
                 for r = rawMinR to rawMaxR do
                     for z = rawMinZ to rawMaxZ do
                         let hexBottomZ = double z * HEX_HEIGHT
                         let hexTopZ = hexBottomZ + HEX_HEIGHT
+
                         if maxAABB.Z >= hexBottomZ && minAABB.Z <= hexTopZ then
                             let hexCenterXY = convertHexToWorld q r 0 0.0
                             let minHexAABB = Vector3(hexCenterXY.X - HEX_RADIUS, hexCenterXY.Y - HEX_RADIUS, hexBottomZ)
                             let maxHexAABB = Vector3(hexCenterXY.X + HEX_RADIUS, hexCenterXY.Y + HEX_RADIUS, hexTopZ)
 
                             if Collision.checkCollisionAABB minAABB maxAABB minHexAABB maxHexAABB then
-                                let overlapsBottomHalf = maxAABB.Z >= hexBottomZ && minAABB.Z < (hexBottomZ + 0.5 * HEX_HEIGHT)
-                                let overlapsTopHalf = maxAABB.Z >= (hexBottomZ + 0.5 * HEX_HEIGHT) && minAABB.Z < hexTopZ
-
-                                let inline checkAndAddSubPrisms (startIndex: int) (endIndex: int) =
-                                    for sub_idx = startIndex to endIndex do
-                                        let subPrismCoords = SubPrismCoords.Normalize(q, r, z, sub_idx)
-                                        let struct(minPrism, maxPrism) = getTriangularPrismAABB subPrismCoords
-
-                                        if Collision.checkCollisionAABB minAABB maxAABB minPrism maxPrism then
-                                            let key = subPrismCoords |> SubPrismKey.pack
-                                            filter.Add key |> ignore
+                                let halfZ = hexBottomZ + 0.5 * HEX_HEIGHT
+                                let overlapsBottomHalf = maxAABB.Z >= hexBottomZ && minAABB.Z < halfZ
+                                let overlapsTopHalf = maxAABB.Z >= halfZ && minAABB.Z < hexTopZ
                                 
                                 if overlapsBottomHalf then
-                                    checkAndAddSubPrisms 0 5
+                                    checkAndAddSubPrisms q r z 0 5
                                 if overlapsTopHalf then
-                                    checkAndAddSubPrisms 6 11
+                                    checkAndAddSubPrisms q r z 6 11
 
         let inline private fillForShift
             (shift: Vector3)
@@ -954,19 +959,30 @@ module Engine =
             let nearMinY = minAABB.Y < margin
             let nearMaxY = maxAABB.Y > (WorldLimits.Y - margin)
 
-            if nearMinX || nearMaxX || nearMinY || nearMaxY then
+            if not <| (nearMinX || nearMaxX || nearMinY || nearMaxY) then
+                buffer.AddRange filter
+            else
                 let shiftBuffer : Span<Vector3> = Stack.alloc 8
-                if nearMinX then fillForShift (Vector3(WorldLimits.X, 0.0, 0.0)) p d o worldCorners shiftBuffer filter
-                if nearMaxX then fillForShift (Vector3(-WorldLimits.X, 0.0, 0.0)) p d o worldCorners shiftBuffer filter
-                if nearMinY then fillForShift (Vector3(0.0, WorldLimits.Y, 0.0)) p d o worldCorners shiftBuffer filter
-                if nearMaxY then fillForShift (Vector3(0.0, -WorldLimits.Y, 0.0)) p d o worldCorners shiftBuffer filter
-                if nearMinX && nearMinY then fillForShift (Vector3(WorldLimits.X, WorldLimits.Y, 0.0)) p d o worldCorners shiftBuffer filter
-                if nearMaxX && nearMinY then fillForShift (Vector3(-WorldLimits.X, WorldLimits.Y, 0.0)) p d o worldCorners shiftBuffer filter
-                if nearMinX && nearMaxY then fillForShift (Vector3(WorldLimits.X, -WorldLimits.Y, 0.0)) p d o worldCorners shiftBuffer filter
-                if nearMaxX && nearMaxY then fillForShift (Vector3(-WorldLimits.X, -WorldLimits.Y, 0.0)) p d o worldCorners shiftBuffer filter
+                if nearMinX then
+                    fillForShift (Vector3(WorldLimits.X, 0.0, 0.0)) p d o worldCorners shiftBuffer filter
+                if nearMaxX then
+                    fillForShift (Vector3(-WorldLimits.X, 0.0, 0.0)) p d o worldCorners shiftBuffer filter
+                if nearMinY then
+                    fillForShift (Vector3(0.0, WorldLimits.Y, 0.0)) p d o worldCorners shiftBuffer filter
+                if nearMaxY then
+                    fillForShift (Vector3(0.0, -WorldLimits.Y, 0.0)) p d o worldCorners shiftBuffer filter
 
-            buffer.AddRange filter
-    
+                if nearMinX && nearMinY then
+                    fillForShift (Vector3(WorldLimits.X, WorldLimits.Y, 0.0)) p d o worldCorners shiftBuffer filter
+                if nearMaxX && nearMinY then
+                    fillForShift (Vector3(-WorldLimits.X, WorldLimits.Y, 0.0)) p d o worldCorners shiftBuffer filter
+                if nearMinX && nearMaxY then
+                    fillForShift (Vector3(WorldLimits.X, -WorldLimits.Y, 0.0)) p d o worldCorners shiftBuffer filter
+                if nearMaxX && nearMaxY then
+                    fillForShift (Vector3(-WorldLimits.X, -WorldLimits.Y, 0.0)) p d o worldCorners shiftBuffer filter
+
+                buffer.AddRange filter
+ 
     [<RequireQualifiedAccess>]
     module Geometry =
         type Repo =
@@ -3143,7 +3159,7 @@ module Engine =
                     let velocityToCancel = finalNormal * velAlongNormal
                     b1.Velocity <- b1.Velocity - velocityToCancel * (1.0 + e)
 
-                    let m1 = if b1.InvMass > EPSILON then 1.0 / b1.InvMass else 1e12
+                    let m1 = b1.InvMass |> safeMass  
                     totalImpulseScalar <- m1 * (velocityToCancel * (1.0 + e)).Magnitude()
                     
                 let invMass1 = b1.InvMass
