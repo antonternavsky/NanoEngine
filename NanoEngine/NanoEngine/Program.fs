@@ -358,7 +358,7 @@ let main _ =
                 let targetBody = runner.GetBody(targetId)
                 let bulletStartPos = targetBody.Position - Vector3(2.0, 0.0, -0.3) 
                 let bulletVel = Vector3(10.0, 0.0, 0.0)
-                let bulletId2 = runner.CreateBody(bulletStartPos, bulletVel, 2.0, Vector3.One, Body.BodyType.Generic, 0.2)
+                let bulletId2 = runner.CreateBody(bulletStartPos, bulletVel, 2.0, Vector3.One, Body.BodyType.Generic, 0.25)
                 runner.State.IslandRepo |> Island.addBody bulletId2
                 runner.Memoize("bulletId2", bulletId2)
 
@@ -485,19 +485,27 @@ let main _ =
             | 13 ->
 
                 Assert.AreEqual 0 runner.State.IslandRepo.ActiveIslandIds.Count "STAGE 13 FAIL: All islands must be asleep"
-                Assert.AreEqual 1 runner.State.IslandRepo.SleepingIslandIds.Count "STAGE 13 FAIL: There should be exactly one sleeping island"
+                Assert.AreEqual 2 runner.State.IslandRepo.SleepingIslandIds.Count "STAGE 13 FAIL: There should be exactly 2 sleeping islands"
 
-                let firstId   = runner.Recall<int>("firstId") 
-                let secondId  = runner.Recall<int>("secondId") 
+                let firstId   = runner.Recall<int>("firstId")
+                let secondId  = runner.Recall<int>("secondId")
                 let thirdId   = runner.Recall<int>("thirdId")
                 let bulletId1 = runner.Recall<int>("bulletId1")
                 let bulletId2 = runner.Recall<int>("bulletId2")
-                let dominoId  = runner.Recall<int>("dominoId") 
+                let dominoId  = runner.Recall<int>("dominoId")
 
-                let theOnlyIsland = runner.GetIslandRefForBody firstId
-                let expectedBodies = set [firstId; secondId; thirdId; bulletId1; bulletId2; dominoId]
-                let actualBodies = set theOnlyIsland.Bodies
-                Assert.AreEqual expectedBodies actualBodies "STAGE 13 FAIL: Incorrect composition of the final merged island. All bodies should be in one island"
+                let mainIslandRef = runner.GetIslandRefForBody firstId
+                let loneBodyIslandRef = runner.GetIslandRefForBody thirdId
+
+                Assert.AreNotEqual mainIslandRef.Id loneBodyIslandRef.Id "STAGE 13 FAIL: The main group and the lone body should be on different islands"
+
+                let expectedMainIslandBodies = set [firstId; secondId; bulletId1; bulletId2; dominoId]
+                let actualMainIslandBodies = set mainIslandRef.Bodies
+                Assert.AreEqual expectedMainIslandBodies actualMainIslandBodies "STAGE 13 FAIL: Incorrect composition of the main island"
+
+                let expectedLoneIslandBodies = set [thirdId]
+                let actualLoneIslandBodies = set loneBodyIslandRef.Bodies
+                Assert.AreEqual expectedLoneIslandBodies actualLoneIslandBodies "STAGE 13 FAIL: Incorrect composition of the lone island (should only contain body 5)"
 
                 let platformSurfaceZ = runner.Recall<double>("platformSurfaceZ")
                 let tolerance = 0.1
@@ -515,20 +523,20 @@ let main _ =
                 let domino_bottomZ = domino.Position.Z - (domino.Dimensions.Z / 2.0)
                 Assert.AreClose platformSurfaceZ domino_bottomZ tolerance "STAGE 13 FAIL: Domino (ID 8) should be resting directly on the platform"
 
+                let body5_bottomZ = body5.Position.Z - (body5.Dimensions.Z / 2.0)
+                Assert.AreClose platformSurfaceZ body5_bottomZ tolerance "STAGE 13 FAIL: Body 5 (the lone one) should be resting directly on the platform"
+
                 let body1_topZ = body1.Position.Z + (body1.Dimensions.Z / 2.0)
                 let body4_bottomZ = body4.Position.Z - (body4.Dimensions.Z / 2.0)
                 Assert.AreClose body1_topZ body4_bottomZ tolerance "STAGE 13 FAIL: Body 4 should be stacked on top of Body 1"
 
                 let domino_topZ = domino.Position.Z + (domino.Dimensions.Z / 2.0)
-                
-                let body5_bottomZ = body5.Position.Z - (body5.Dimensions.Z / 2.0)
-                Assert.AreClose domino_topZ body5_bottomZ tolerance "STAGE 13 FAIL: Body 5 should be resting on the fallen domino (ID 8)"
-
                 let body6_bottomZ = body6.Position.Z - (body6.Dimensions.Z / 2.0)
-                Assert.AreClose domino_topZ body6_bottomZ tolerance "STAGE 13 FAIL: Body 6 should be resting on the fallen domino (ID 8)"
-                
+                Assert.AreClose domino_topZ body6_bottomZ tolerance "STAGE 13 FAIL: Bullet 1 (ID 6) should be resting on the fallen domino (ID 8)"
+
+                let body6_topZ = body6.Position.Z + (body6.Dimensions.Z / 2.0)
                 let body7_bottomZ = body7.Position.Z - (body7.Dimensions.Z / 2.0)
-                Assert.AreClose domino_topZ body7_bottomZ tolerance "STAGE 13 FAIL: Body 7 should be resting on the fallen domino (ID 8)"
+                Assert.AreClose body6_topZ body7_bottomZ tolerance "STAGE 13 FAIL: Bullet 2 (ID 7) should be stacked on top of Bullet 1 (ID 6)"
 
                 runner.State.TestPhase <- 14
                 InProgress
@@ -583,7 +591,7 @@ let main _ =
                 if runner.State.IslandRepo.ActiveIslandIds.Count = 0 then
                     runner.State.TestPhase <- 16
                     InProgress
-                elif i >= 1500 then
+                elif i >= 620 then
                     Assert.Fail "STAGE 15 FAIL: The scene did not stabilize after being cleared by a bulldozer"
                 else
                     let bulldozerId = runner.Recall<int>("bulldozerId")
@@ -628,20 +636,31 @@ let main _ =
                         Assert.IsTrue(p.X >= 0 && p.X <= 10 || p.X >= 65500) "p.X >= 0 && p.X <= 10 || p.X >= 65500"
                         Assert.IsTrue(p.Y >= 0 && p.Y <= 10 || p.Y >= 56700) "p.Y >= 0 && p.Y <= 10 || p.Y >= 56700"
                         
-                if sleepingIslandCount = 6 then
-                    Assert.AreEqual 0 runner.State.IslandRepo.ActiveIslandIds.Count "FINISH: All islands must be asleep"
+                if sleepingIslandCount = 4 then
+                    Assert.AreEqual 4 runner.State.IslandRepo.SleepingIslandIds.Count "STAGE 16 FAIL: Expected exactly 4 sleeping islands"
+                    Assert.AreEqual 0 runner.State.IslandRepo.ActiveIslandIds.Count "STAGE 16 FAIL: All islands must be asleep"
 
-                    let body1Id = runner.Recall<int>("firstId")
-                    let fallenTreeBodyId = 2
-                    let body4Id = runner.Recall<int>("secondId")
-                    let body5Id = runner.Recall<int>("thirdId")
-                    let body6Id = runner.Recall<int>("bulletId1")
-                    let body7Id = runner.Recall<int>("bulletId2")
-                    let dominoId = runner.Recall<int>("dominoId")
+                    let firstId   = runner.Recall<int>("firstId")
+                    let secondId  = runner.Recall<int>("secondId")
+                    let thirdId   = runner.Recall<int>("thirdId")
+                    let bulletId1 = runner.Recall<int>("bulletId1")
+                    let bulletId2 = runner.Recall<int>("bulletId2")
+                    let dominoId  = runner.Recall<int>("dominoId")
                     let bulldozerId = runner.Recall<int>("bulldozerId")
+                    let fallenTreeBodyId = 2
                     
                     let originalFallenTreeId = runner.Recall<int>("tree1Id")
                     let smallTreeId = runner.Recall<int>("tree2Id")
+
+                    let island_floor_pile_1 = runner.GetIslandRefForBody firstId
+                    let island_floor_pile_2 = runner.GetIslandRefForBody bulletId1
+                    let island_bulldozer_and_tree = runner.GetIslandRefForBody bulldozerId
+                    let island_domino = runner.GetIslandRefForBody dominoId
+
+                    Assert.AreEqual (set [firstId; secondId; thirdId]) (set island_floor_pile_1.Bodies) "STAGE 16 FAIL: Incorrect island composition. Expected [1; 4; 5]"
+                    Assert.AreEqual (set [bulletId1; bulletId2]) (set island_floor_pile_2.Bodies) "STAGE 16 FAIL: Incorrect island composition. Expected [6; 7]"
+                    Assert.AreEqual (set [bulldozerId; fallenTreeBodyId]) (set island_bulldozer_and_tree.Bodies) "STAGE 16 FAIL: Incorrect composition for the bulldozer and tree island. Expected [9; 2]"
+                    Assert.AreEqual (set [dominoId]) (set island_domino.Bodies) "STAGE 16 FAIL: Domino (ID 8) should be in its own separate island"
 
                     let platformZ = (double 10 + 1.0) * HEX_HEIGHT
                     let floorZ = 0.0
@@ -652,45 +671,35 @@ let main _ =
                         let bodyBottomZ = body.Position.Z - body.Dimensions.Z / 2.0
                         Assert.AreClose surfaceZ bodyBottomZ tolerance $"{bodyName} (ID {bodyId}) must be resting on surface Z={surfaceZ:F2}"
 
-                    let island_stack_on_floor = runner.GetIslandRefForBody body1Id
-                    Assert.AreEqual (set [body1Id; body4Id]) (set island_stack_on_floor.Bodies) "STAGE 16 FAIL: Incorrect composition for the stack on the floor [1; 4]"
-                    checkIsOnSurface body1Id floorZ "Body 1"
-                    let topOfBody1 = (runner.GetBody body1Id).Position.Z + (runner.GetBody body1Id).Dimensions.Z / 2.0
-                    let bottomOfBody4 = (runner.GetBody body4Id).Position.Z - (runner.GetBody body4Id).Dimensions.Z / 2.0
-                    Assert.AreClose topOfBody1 bottomOfBody4 tolerance "Body 4 should be stacked on top of Body 1"
+                    checkIsOnSurface firstId floorZ "Body 1"
+                    checkIsOnSurface thirdId floorZ "Body 5"
+                    checkIsOnSurface bulletId1 floorZ "Body 6"
 
-                    let island_body5 = runner.GetIslandRefForBody body5Id
-                    Assert.AreEqual (set [body5Id]) (set island_body5.Bodies) "STAGE 16 FAIL: Body 5 should be in its own island"
-                    checkIsOnSurface body5Id floorZ "Body 5"
-
-                    let island_body6 = runner.GetIslandRefForBody body6Id
-                    Assert.AreEqual (set [body6Id]) (set island_body6.Bodies) "STAGE 16 FAIL: Body 6 should be in its own island"
-                    checkIsOnSurface body6Id floorZ "Body 6"
-
-                    let island_body7 = runner.GetIslandRefForBody body7Id
-                    Assert.AreEqual (set [body7Id]) (set island_body7.Bodies) "STAGE 16 FAIL: Body 7 should be in its own island"
-                    checkIsOnSurface body7Id floorZ "Body 7"
-
-                    let island_domino = runner.GetIslandRefForBody dominoId
-                    Assert.AreEqual (set [dominoId]) (set island_domino.Bodies) "STAGE 16 FAIL: Domino (ID 8) should be in its own island"
+                    checkIsOnSurface bulldozerId platformZ "Bulldozer 9"
                     checkIsOnSurface dominoId platformZ "Domino 8"
 
-                    let island_bulldozer_and_tree = runner.GetIslandRefForBody bulldozerId
-                    Assert.AreEqual (set [bulldozerId; fallenTreeBodyId]) (set island_bulldozer_and_tree.Bodies) "STAGE 16 FAIL: Incorrect composition for the bulldozer and tree island [9; 2]"
-                    checkIsOnSurface bulldozerId platformZ "Bulldozer 9"
+                    let topOfBody1 = (runner.GetBody firstId).Position.Z + (runner.GetBody firstId).Dimensions.Z / 2.0
+                    let bottomOfBody4 = (runner.GetBody secondId).Position.Z - (runner.GetBody secondId).Dimensions.Z / 2.0
+                    Assert.AreClose topOfBody1 bottomOfBody4 tolerance "Body 4 (ID 4) should be stacked on top of Body 1 (ID 1)"
+
+                    let topOfBody6 = (runner.GetBody bulletId1).Position.Z + (runner.GetBody bulletId1).Dimensions.Z / 2.0
+                    let bottomOfBody7 = (runner.GetBody bulletId2).Position.Z - (runner.GetBody bulletId2).Dimensions.Z / 2.0
+                    Assert.AreClose topOfBody6 bottomOfBody7 tolerance "Body 7 (ID 7) should be stacked on top of Body 6 (ID 6)"
+                    
                     let topOfBulldozer = (runner.GetBody bulldozerId).Position.Z + (runner.GetBody bulldozerId).Dimensions.Z / 2.0
                     let bottomOfFallenTree = (runner.GetBody fallenTreeBodyId).Position.Z - (runner.GetBody fallenTreeBodyId).Dimensions.Z / 2.0
                     Assert.AreClose topOfBulldozer bottomOfFallenTree tolerance "Fallen Tree (ID 2) must be resting on top of the Bulldozer (ID 9)"
- 
+
                     Assert.IsFalse (runner.State.FloraRepo.AllTrees.ContainsKey originalFallenTreeId) "The large tree should have been broken and removed from the flora repository"
                     Assert.IsTrue (runner.State.FloraRepo.AllTrees.ContainsKey smallTreeId) "The small, unbreakable tree should have survived"
                     
-                    let allIds = [body1Id; fallenTreeBodyId; body4Id; body5Id; body6Id; body7Id; dominoId; bulldozerId]
+                    let allIds = [firstId; fallenTreeBodyId; secondId; thirdId; bulletId1; bulletId2; dominoId; bulldozerId]
                     allIds |> Seq.iter isValidXYCoords
-                    
+                        
                     Success $"{loc} COMPLETED"
+
                 else
-                    Assert.Fail $"[{loc}] Unexpected number of sleeping islands: {sleepingIslandCount}. The test requires exactly 6"
+                    Assert.Fail $"[{loc}] Unexpected number of sleeping islands: {sleepingIslandCount}. The test requires exactly 4"
             | _ -> InProgress
     })
     

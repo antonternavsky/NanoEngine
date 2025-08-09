@@ -32,12 +32,14 @@ module Engine =
     let [<Literal>] GRID_HEIGHT_Z = 248
     let [<Literal>] HEX_WIDTH = 1.0
     let HEX_RADIUS = HEX_WIDTH / SQRT3
+    let [<Literal>] DYNAMIC_SUPPORT_PROBE_RADIUS = MIN_DIMENSION_THRESHOLD
+    let STATIC_SUPPORT_PROBE_RADIUS = HEX_RADIUS * 0.2
     let [<Literal>] HEX_HEIGHT = 1.0
     let [<Literal>] MAX_SPEED = 10.0
     let MAX_SPEED_SQ = pown MAX_SPEED 2
     let WORLD_HEIGHT_IN_METERS = double GRID_HEIGHT_Z * HEX_HEIGHT
     let [<Literal>] FRAMES_TO_UNROOT = 2
-    let POSITION_THRESHOLD_SQ = pown (HEX_RADIUS * 0.03745) 2
+    let POSITION_THRESHOLD_SQ = pown (HEX_RADIUS * 0.04) 2
     let ORIENTATION_THRESHOLD = 0.9998 // cos(1.14 градуса)
             
     [<RequireQualifiedAccess>]
@@ -2807,15 +2809,14 @@ module Engine =
             if checkPoint.Z <= PENETRATION_SLOP then
                 true
             else
-                let radius = HEX_RADIUS * 0.2
                 let checkDepth = PENETRATION_SLOP * 2.0
-                let probeDims = Vector3(radius * 2.0, radius * 2.0, checkDepth)
+                let staticProbeDims = Vector3(STATIC_SUPPORT_PROBE_RADIUS * 2.0, STATIC_SUPPORT_PROBE_RADIUS * 2.0, checkDepth)
                 let probeCenter = Vector3(checkPoint.X, checkPoint.Y, checkPoint.Z - checkDepth / 2.0)
                 let probeOrientation = Matrix3x3.Identity
 
                 Grid.fillOverlappingSubPrismsAABB
                     probeCenter
-                    probeDims
+                    staticProbeDims
                     probeOrientation
                     buffers.UniquePrismsFilterBuffer
                     buffers.UniquePrismsBuffer
@@ -2827,22 +2828,14 @@ module Engine =
                     let cellKey = occupiedCells[i]
                     i <- i + 1
                     if geometryRepo |> Geometry.isSolid cellKey then
-                        let struct(staticPos, staticDims, staticOrient) = cellKey |> Grid.getPrismSpaceByKey
-                        let result =
-                            Collision.checkCollisionSAT
-                                probeCenter
-                                probeDims
-                                probeOrientation
-                                staticPos
-                                staticDims
-                                staticOrient
-                        
-                        if result.AreColliding then
-                            isSupported <- true
+                        isSupported <- true
 
                 if not <| isSupported then
-                    let probeMinCorner = probeCenter - probeDims / 2.0
-                    let probeMaxCorner = probeCenter + probeDims / 2.0
+                    let dynamicProbeRadius = DYNAMIC_SUPPORT_PROBE_RADIUS
+                    let dynamicProbeDims = Vector3(dynamicProbeRadius * 2.0, dynamicProbeRadius * 2.0, checkDepth)
+                    
+                    let probeMinCorner = probeCenter - dynamicProbeDims / 2.0
+                    let probeMaxCorner = probeCenter + dynamicProbeDims / 2.0
 
                     let mutable i = 0
                     while not <| isSupported && i < island.BodiesSpan.Length do
@@ -2854,7 +2847,7 @@ module Engine =
                                 let result =
                                     Collision.checkCollisionSAT
                                         probeCenter
-                                        probeDims
+                                        dynamicProbeDims
                                         probeOrientation
                                         otherBody.Position
                                         otherBody.Dimensions
@@ -2884,35 +2877,75 @@ module Engine =
                 if isCenterOfMassSupported then
                     ValueNone
                 else
-                    let localBaseCenter = Vector3(0.0, 0.0, -h.Z)
-                    let worldBaseCenter = body.Position + body.Orientation * localBaseCenter
-                    let mutable instabilityVector = body.Position - worldBaseCenter
-                    WorldLimits.relative &instabilityVector
-                    
-                    instabilityVector.Z <- 0.0
+                    let localCornersSpan = Stack.alloc 4
+                    localCornersSpan[0] <- Vector3(-h.X, -h.Y, -h.Z)
+                    localCornersSpan[1] <- Vector3(h.X, -h.Y, -h.Z)
+                    localCornersSpan[2] <- Vector3(h.X, h.Y, -h.Z)
+                    localCornersSpan[3] <- Vector3(-h.X, h.Y, -h.Z) 
 
-                    let corners = [| Vector3(-h.X, -h.Y, -h.Z); Vector3(h.X, -h.Y, -h.Z); 
-                                     Vector3(h.X, h.Y, -h.Z); Vector3(-h.X, h.Y, -h.Z) |]
-                    
-                    let mutable pivotCornerLocal = Vector3.Zero
-                    let mutable minProjection = Double.MaxValue
+                    let mutable supportedCorners = 0
+                    let supportedCornersSpan = Stack.alloc 4
+                    let supportedLocalCornersSpan = Stack.alloc 4
+                                        
+                    let mutable unsupportedCorners = 0
+                    let unsupportedCornersSpan = Stack.alloc 4
 
-                    for localCorner in corners do
-                        let worldCornerVector = body.Orientation * localCorner
-                        let projection = Vector3.Dot(instabilityVector, worldCornerVector)
-                        
-                        if projection < minProjection then
-                            minProjection <- projection
-                            pivotCornerLocal <- localCorner
-                    
-                    let pivotPoint = body.Position + body.Orientation * pivotCornerLocal
-                    let mutable fallDirection = body.Position - pivotPoint
-                    WorldLimits.relative &fallDirection
-                    fallDirection.Z <- 0.0 
-                    let rotationAxis = Vector3.Cross(fallDirection, Vector3.Up)
-                    let finalAxis = if rotationAxis.MagnitudeSq() < EPSILON then Vector3.UnitX else rotationAxis.Normalize()
-                    ValueSome(struct(pivotPoint, finalAxis))
+                    for localCorner in localCornersSpan do
+                        let worldCorner = body.Position + body.Orientation * localCorner
+                        if isPointSupported geometryRepo bodyRepo &body &island worldCorner buffers then
+                            supportedCornersSpan[supportedCorners] <- worldCorner
+                            supportedLocalCornersSpan[supportedCorners] <- localCorner
+                            supportedCorners <- supportedCorners + 1
+                        else
+                            unsupportedCornersSpan[unsupportedCorners] <- worldCorner
+                            unsupportedCorners <- unsupportedCorners + 1
+                            
+                    match supportedCorners with
+                    | 2 -> 
+                        let local1 = supportedLocalCornersSpan[0]
+                        let local2 = supportedLocalCornersSpan[1]
 
+                        if (local1.X = -local2.X) && (local1.Y = -local2.Y) then
+                           // We found support on diagonal corners-this is stable for bodies with a square base,
+                           // for rectangular ones this is not true, but for simplicity we will assume that it is also stable
+                           ValueNone
+                        else
+                            // Game design decision for robust falling behavior.
+                            // Instead of pivoting around the supported edge (physically accurate),
+                            // we pivot around the unsupported edge. This ensures the body
+                            // moves away from its unstable position and guarantees it will fall off
+                            let pivotEdgeCorner1 = unsupportedCornersSpan[0]
+                            let pivotEdgeCorner2 = unsupportedCornersSpan[1]
+                            
+                            let pivotPoint = (pivotEdgeCorner1 + pivotEdgeCorner2) / 2.0
+                            let mutable fallDirection = projectedCenterOfMass - pivotPoint
+                            WorldLimits.relative &fallDirection
+
+                            let mutable initialRotationAxis = pivotEdgeCorner2 - pivotEdgeCorner1
+                            WorldLimits.relative &initialRotationAxis
+
+                            if initialRotationAxis.MagnitudeSq() < EPSILON_X2 then
+                                ValueNone
+                            else
+                                let crossProductZ = initialRotationAxis.X * fallDirection.Y - initialRotationAxis.Y * fallDirection.X
+                                let finalRotationAxis = if crossProductZ < 0.0 then -initialRotationAxis else initialRotationAxis
+                                ValueSome(struct(pivotPoint, finalRotationAxis.Normalize()))
+                    
+                    | 1 ->
+                        let pivotPoint = supportedCornersSpan[0]
+                        let mutable fallDirection = projectedCenterOfMass - pivotPoint
+                        WorldLimits.relative &fallDirection
+                        fallDirection.Z <- 0.0
+
+                        if fallDirection.MagnitudeSq() < EPSILON_X2 then
+                            ValueNone
+                        else
+                            let rotationAxis = Vector3.Cross(fallDirection, Vector3.Up)
+                            let finalAxis = if rotationAxis.MagnitudeSq() < EPSILON_X2 then Vector3.UnitX else rotationAxis.Normalize()
+                            ValueSome(struct(pivotPoint, finalAxis))
+                    
+                    | _ -> ValueNone
+                    
         let inline private getStableFrictionNormal (normal: Vector3) (b1: inref<Body.T>) (b2: inref<Body.T>) =
             if abs(Vector3.Dot(b1.Orientation.R2, b2.Orientation.R2)) > 0.98 && abs(normal.Z) > 0.9 then
                 if normal.Z > 0.0 then Vector3.Up else Vector3.Down
