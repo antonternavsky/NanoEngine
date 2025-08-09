@@ -520,47 +520,44 @@ module Engine =
             let t_y = MathF.Vector3f.Dot(delta_f, o1_f.R1)
             let t_z = MathF.Vector3f.Dot(delta_f, o1_f.R2)
 
-            let inline makeFullSAT() =
-                let mutable minPenetrationSq = Single.MaxValue
-                let mutable winningAxis = MathF.Vector3f.Zero
-                let mutable winningAxisIndex = -1
+            let inline runSATLoop startIndex skipIndex minPenSq startAxis startAxisIndex =
+                let mutable minPenetrationSq = minPenSq
+                let mutable winningAxis = startAxis
+                let mutable winningAxisIndex = startAxisIndex
                 let mutable areColliding = true
-                let mutable index = 0
+                let mutable index = startIndex
 
                 while areColliding && index < 15 do
-                    let result =
-                        testSingleAxis
-                            index
-                            h1_f h2_f
-                            delta_f
-                            o1_f o2_f
-                            ac00 ac01 ac02 ac10 ac11 ac12 ac20 ac21 ac22
-                            t_x t_y t_z
+                    if index <> skipIndex then
+                        let result =
+                            testSingleAxis
+                                index
+                                h1_f h2_f
+                                delta_f
+                                o1_f o2_f
+                                ac00 ac01 ac02 ac10 ac11 ac12 ac20 ac21 ac22
+                                t_x t_y t_z
 
-                    if result.IsValidAxis then
-                        if result.IsSeparating then
-                            areColliding <- false
-                            winningAxisIndex <- index
-                        else
-                            if result.PenetrationSq < minPenetrationSq then
+                        if result.IsValidAxis then
+                            if result.IsSeparating then
+                                areColliding <- false
+                                winningAxisIndex <- index
+                            elif result.PenetrationSq < minPenetrationSq then
                                 minPenetrationSq <- result.PenetrationSq
                                 winningAxis <- result.Axis
                                 winningAxisIndex <- index
                     index <- index + 1
-                
+
                 if not <| areColliding then
                     struct(CollisionResult.NoCollision, winningAxisIndex)
                 else
                     let finalDepth_d = float (MathF.Sqrt minPenetrationSq)
                     let mag_f = winningAxis.Length()
                     let mutable normal_f = winningAxis / mag_f
-
                     if MathF.Vector3f.Dot(normal_f, delta_f) < 0.0f then
                         normal_f <- -normal_f
-                    
                     let normal_d = MathF.toDoubleV3 normal_f
                     let result_d = CollisionResult.Create(normal_d, finalDepth_d)
-                    
                     struct(result_d, winningAxisIndex)
 
             if cachedAxisIndex <> -1 then
@@ -572,13 +569,13 @@ module Engine =
                         o1_f o2_f
                         ac00 ac01 ac02 ac10 ac11 ac12 ac20 ac21 ac22
                         t_x t_y t_z
-                
+
                 if fastPathResult.IsSeparating || not <| fastPathResult.IsValidAxis then
                     struct(CollisionResult.NoCollision, cachedAxisIndex)
                 else
-                    makeFullSAT()
+                    runSATLoop 0 cachedAxisIndex fastPathResult.PenetrationSq fastPathResult.Axis cachedAxisIndex
             else
-                makeFullSAT()
+                runSATLoop 0 -1 Single.MaxValue MathF.Vector3f.Zero -1
 
         let inline checkCollisionSAT (p1: Vector3) (d1: Vector3) (o1: Matrix3x3) (p2: Vector3) (d2: Vector3) (o2: Matrix3x3) =
             let struct(result, _) = checkCollisionSATWithCachedAxis p1 d1 o1 p2 d2 o2 -1
