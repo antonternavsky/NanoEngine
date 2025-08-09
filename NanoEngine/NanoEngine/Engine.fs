@@ -3602,10 +3602,9 @@ module Engine =
         let private resolveStaticGeometryCollision
             (b1: byref<Body.T>)
             (island: byref<Island.T>)
-            staticPos
-            staticDims
-            staticOrient
+            (prismData: inref<struct(Vector3 * Vector3 * Matrix3x3)>)
             dt =
+            let struct(staticPos, staticDims, staticOrient) = prismData
             let result =
                 Collision.checkCollisionSAT
                     b1.Position
@@ -3726,15 +3725,11 @@ module Engine =
                             if not <| isPrismDataExists then
                                 prismData <- cellKey |> Grid.getPrismSpaceByKey
 
-                            let struct(staticPos, staticDims, staticOrient) = prismData
-                            
                             if processedStatic.Add cellKey then
                                 resolveStaticGeometryCollision
                                     &b1
                                     &island
-                                    staticPos
-                                    staticDims
-                                    staticOrient
+                                    &prismData
                                     sub_dt
 
                         match floraRepo |> Flora.tryGetTreesInCell cellKey with
