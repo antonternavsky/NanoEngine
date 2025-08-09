@@ -14,7 +14,7 @@ open Serilog
 
 module Engine =
     let [<Literal>] PENETRATION_SLOP = 0.01
-    let [<Literal>] MAX_PENETRATION = PENETRATION_SLOP * 4.0
+    let [<Literal>] DISABLE_SLEEP_ISLAND_PENETRATION = PENETRATION_SLOP * 4.0
     let [<Literal>] CORRECTION_PERCENT = 0.65
     let [<Literal>] RESTITUTION_THRESHOLD = 2.0
     let [<Literal>] EPSILON = 1e-6
@@ -2085,7 +2085,7 @@ module Engine =
                     let occupiedCells = SpatialHash.getOccupiedCells body.Id spatialHash
                     
                     let mutable i = 0
-                    while not hasFoundSupport && i < occupiedCells.Length do
+                    while not <| hasFoundSupport && i < occupiedCells.Length do
                         let cellKey = &occupiedCells[i]
                         if geometryRepo |> Geometry.isSolid cellKey then
                             let struct (staticPos, staticDims, staticOrient) = cellKey |> Grid.getPrismSpaceByKey
@@ -2468,7 +2468,7 @@ module Engine =
                 elif island.Bodies.Count = 0 then
                         r._removeIslandsBuffer.Add island.Id
                         island |> Dispose.action
-                elif not island.IsAwake then
+                elif not <| island.IsAwake then
                     island.IsAwake <- true
                     island.FramesResting <- 0
                     island.IsGroundedCacheValid <- false
@@ -2573,7 +2573,7 @@ module Engine =
                             let bodyId = island.BodiesSpan[i]
                             i <- i + 1
                             let body = &Body.getRef bodyId r._bodyRepo
-                            if not <| Unsafe.IsNullRef &body && body.Velocity.MagnitudeSq() >= SLEEP_VELOCITY_THRESHOLD_SQ then
+                            if body.Velocity.MagnitudeSq() >= SLEEP_VELOCITY_THRESHOLD_SQ then
                                 isStillEligibleForSleep <- false
                         
                         if isStillEligibleForSleep then
@@ -3190,32 +3190,31 @@ module Engine =
                 
             if dynamicBodyId <> kinematicBody.Id then
                 let otherBody = &Body.getRef dynamicBodyId bodyRepo
-                if not <| Unsafe.IsNullRef &otherBody then
-                    let result =
-                        Collision.checkCollisionSAT
-                            kinematicBody.Position
-                            kinematicBody.Dimensions
-                            kinematicBody.Orientation
-                            otherBody.Position
-                            otherBody.Dimensions
-                            otherBody.Orientation
-                    
-                    if result.AreColliding then
-                        let otherIsland = &Island.getIslandRefForBody dynamicBodyId islandRepo
-                        Island.requestWakeIsland &otherIsland islandRepo
+                let result =
+                    Collision.checkCollisionSAT
+                        kinematicBody.Position
+                        kinematicBody.Dimensions
+                        kinematicBody.Orientation
+                        otherBody.Position
+                        otherBody.Dimensions
+                        otherBody.Orientation
+                
+                if result.AreColliding then
+                    let otherIsland = &Island.getIslandRefForBody dynamicBodyId islandRepo
+                    Island.requestWakeIsland &otherIsland islandRepo
 
-                        // Считаем коллизию, где у кинематического тела инвертированная масса равна 0,
-                        // а у динамического его реальная инвертированная масса
-                        // Это заставит динамическое тело отреагировать на удар, а кинематическое положить болт
-                        resolveDynamicCollision
-                            &kinematicBody
-                            &otherBody
-                            result
-                            0.0
-                            otherBody.InvMass
-                        |> ignore
+                    // Считаем коллизию, где у кинематического тела инвертированная масса равна 0,
+                    // а у динамического его реальная инвертированная масса
+                    // Это заставит динамическое тело отреагировать на удар, а кинематическое положить болт
+                    resolveDynamicCollision
+                        &kinematicBody
+                        &otherBody
+                        result
+                        0.0
+                        otherBody.InvMass
+                    |> ignore
 
-                        otherBody.IsSnappedToGrid <- false
+                    otherBody.IsSnappedToGrid <- false
         
         let private processCollidingBody
             bodyRepo
@@ -3228,35 +3227,34 @@ module Engine =
             
             if otherId <> kinematicBody.Id then
                 let otherBody = &Body.getRef otherId bodyRepo
-                if not <| Unsafe.IsNullRef &otherBody then
-                    let ghostResult =
-                        Collision.checkCollisionSAT
-                            finalPosition
-                            finalDimensions
-                            finalOrientation
-                            otherBody.Position
-                            otherBody.Dimensions
-                            otherBody.Orientation
-                    
-                    if ghostResult.AreColliding then
-                        let mutable ghostBody = Body.T()
-                        ghostBody.Position <- finalPosition
-                        ghostBody.Dimensions <- finalDimensions
-                        ghostBody.Orientation <- finalOrientation
-                        ghostBody.Velocity <- Vector3.Zero
+                let ghostResult =
+                    Collision.checkCollisionSAT
+                        finalPosition
+                        finalDimensions
+                        finalOrientation
+                        otherBody.Position
+                        otherBody.Dimensions
+                        otherBody.Orientation
+                
+                if ghostResult.AreColliding then
+                    let mutable ghostBody = Body.T()
+                    ghostBody.Position <- finalPosition
+                    ghostBody.Dimensions <- finalDimensions
+                    ghostBody.Orientation <- finalOrientation
+                    ghostBody.Velocity <- Vector3.Zero
 
-                        resolveDynamicCollision
-                            &ghostBody
-                            &otherBody
-                            ghostResult
-                            0.0
-                            otherBody.InvMass
-                        |> ignore
+                    resolveDynamicCollision
+                        &ghostBody
+                        &otherBody
+                        ghostResult
+                        0.0
+                        otherBody.InvMass
+                    |> ignore
 
-                        WorldLimits.wrapPosition &otherBody.Position
+                    WorldLimits.wrapPosition &otherBody.Position
 
-                        let island = &Island.getIslandRefForBody otherId islandRepo
-                        Island.requestWakeIsland &island islandRepo
+                    let island = &Island.getIslandRefForBody otherId islandRepo
+                    Island.requestWakeIsland &island islandRepo
         
         let private applyKinematicUpdates sub_dt engine =
             
@@ -3271,7 +3269,7 @@ module Engine =
                 let island = &Island.getIslandRef islandId islandRepo
                 for id in island.BodiesSpan do
                     let body = &Body.getRef id bodyRepo
-                    if not <| Unsafe.IsNullRef &body && body.IsForceFalling && not body.IsFallingOver then
+                    if body.IsForceFalling && not body.IsFallingOver then
                         bodiesToInitiateFall.Add id
             
             for id in bodiesToInitiateFall.Span do
@@ -3328,7 +3326,7 @@ module Engine =
                             buffers.UniquePrismsBuffer
 
                         let mutable cellIdx = 0
-                        while not hasStoppedOnStatic && cellIdx < buffers.UniquePrismsBuffer.Count do
+                        while not <| hasStoppedOnStatic && cellIdx < buffers.UniquePrismsBuffer.Count do
                             let cellKey = buffers.UniquePrismsBuffer[cellIdx]
                             if geometryRepo |> Geometry.isSolid cellKey then
                                 let struct (staticPos, staticDims, staticOrient) = cellKey |> Grid.getPrismSpaceByKey 
@@ -3457,9 +3455,8 @@ module Engine =
                             dt
                         
                         let island = &Island.getIslandRefForBody b1.Id islandRepo
-                        if not <| Unsafe.IsNullRef &island then
-                            island.UpdateMaxPenetration penetrationDepth
-                            island.IsGrounded <- true
+                        island.UpdateMaxPenetration penetrationDepth
+                        island.IsGrounded <- true
 
                 if b1.MaxAABB.Z > WORLD_HEIGHT_IN_METERS - PENETRATION_SLOP then
                     let highestPointZ = b1.Position.Z + getRadiusZ &b1 &radiusZ
@@ -3615,10 +3612,9 @@ module Engine =
                 let totalImpulseScalar = resolveStaticCollision &b1 result
                                         
                 resolveStaticFriction &b1 finalNormal totalImpulseScalar b1.InvMass dt
-                if not <| Unsafe.IsNullRef &island then
-                    island.UpdateMaxPenetration penetrationDepth
-                    island.IsGroundedCacheValid <- true
-                    island.IsGrounded <- true
+                island.UpdateMaxPenetration penetrationDepth
+                island.IsGroundedCacheValid <- true
+                island.IsGrounded <- true
                     
         let private resolveFloraCollision
             (b1: byref<Body.T>)
@@ -3813,7 +3809,7 @@ module Engine =
                     island.IsSlow <- isStillSlow
                     
                     if island.IsSlow then
-                        if island.MaxPenetrationThisStep > MAX_PENETRATION then
+                        if island.MaxPenetrationThisStep > DISABLE_SLEEP_ISLAND_PENETRATION then
                             island.FramesResting <- 0
                         elif Island.isGrounded bodyRepo geometryRepo spatialHash &island islandRepo then
                             island.FramesResting <- island.FramesResting + 1
@@ -3939,7 +3935,7 @@ module Engine =
                     let island = &Island.getIslandRef islandId engine._islandRepo
                     for bodyId in island.BodiesSpan do
                         let body = &Body.getRef bodyId engine._bodyRepo
-                        if not <| Unsafe.IsNullRef &body && not <| body.IsFallingOver then                          
+                        if not <| body.IsFallingOver then                          
                             let vSq = body.Velocity.MagnitudeSq()
                             if vSq > MAX_SPEED_SQ then
                                 body.Velocity <- body.Velocity.Normalize() * MAX_SPEED
