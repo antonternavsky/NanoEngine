@@ -1593,21 +1593,22 @@ module Engine =
             member this.ComponentCount = this._componentCount
 
             member this.GetAllComponents() =
-                use components = new PooledDictionary<int, PooledList<int>>()
-                for id in this._mapIdToIndex.Keys do
-                    let rootId = this.Find id
-                    let list =
-                        match components.TryGetValue rootId with
-                        | true, list -> list
-                        | false, _ ->
-                            let newList = new PooledList<int>()
-                            components.Add(rootId, newList)
-                            newList
-                    list.Add id
+                let mapIndexToId = this._mapIndexToId.AsSpan()
+                let result = new PooledList<PooledList<int>>()
+                use rootMap = new PooledDictionary<int, PooledList<int>>()
 
-                let result = new PooledList<PooledList<int>>(components.Count)
-                for componentList in components.Values do
-                    result.Add componentList
+                for i = 0 to mapIndexToId.Length - 1 do
+                    let id = mapIndexToId[i]
+                    let rootIndex = this.FindRootIndex(i)
+                    let rootId = mapIndexToId[rootIndex]
+
+                    match rootMap.TryGetValue rootId with
+                    | true, list -> list.Add id
+                    | false, _ ->
+                        let newList = new PooledList<int>()
+                        newList.Add id
+                        rootMap.Add(rootId, newList)
+                        result.Add newList
                 result
                 
         let create(ids: ReadOnlySpan<int>) =
@@ -2063,9 +2064,9 @@ module Engine =
                 dsu.Union(id1, id2)
 
             if dsu.ComponentCount <= 1 then
-                new PooledList<PooledList<int>>()
+                ValueNone
             else
-                dsu.GetAllComponents()
+                dsu.GetAllComponents() |> ValueSome
         
         let private hasStaticSupport
             (body: inref<Body.T>)
@@ -2501,12 +2502,8 @@ module Engine =
             for islandIdToSplit in r._islandsMarkedForSplit do
                 let mutable originalIsland = &getIslandRef islandIdToSplit r
                 if not <| Unsafe.IsNullRef &originalIsland then
-                    use components = findConnectedComponents originalIsland.BodiesSpan &originalIsland
-
-                    if components.Count <= 1 then
-                        components |> Seq.iter Dispose.action
-                    else
-
+                    match findConnectedComponents originalIsland.BodiesSpan &originalIsland with
+                    | ValueSome components ->
                         r._logger.Debug("Splitting {IslandId} into {ComponentCount} components",  originalIsland.Id, components.Count)
 
                         let originalMaxPenetration = originalIsland.MaxPenetrationThisStep
@@ -2561,7 +2558,7 @@ module Engine =
                             originalIsland.RemoveContact key |> ignore
 
                         components |> Seq.iter Dispose.action
-                
+                    | ValueNone -> ()
             r._islandsMarkedForSplit.Clear()
 
             for islandId in r._islandsToSleep do
