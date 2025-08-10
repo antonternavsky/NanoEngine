@@ -3070,8 +3070,8 @@ module Engine =
                     
                     | _ -> ValueNone
                     
-        let inline private getStableFrictionNormal (normal: Vector3) (b1: inref<Body.T>) (b2: inref<Body.T>) =
-            if abs(Vector3.Dot(b1.Orientation.R2, b2.Orientation.R2)) > 0.98 && abs(normal.Z) > 0.9 then
+        let inline private getStableFrictionNormal (normal: Vector3) (o1: Matrix3x3) (o2: Matrix3x3) =
+            if abs(Vector3.Dot(o1.R2, o2.R2)) > 0.98 && abs(normal.Z) > 0.9 then
                 if normal.Z > 0.0 then Vector3.Up else Vector3.Down
             else
                 normal
@@ -3141,7 +3141,7 @@ module Engine =
                     effectiveNormalImpulse <- effectiveNormalImpulse + gravityImpulse
 
                 if effectiveNormalImpulse > 0.0 then
-                    let frictionNormal = getStableFrictionNormal normal &b1 &b2
+                    let frictionNormal = getStableFrictionNormal normal b1.Orientation b2.Orientation
 
                     let relativeVelocity = b2.Velocity - b1.Velocity
                     let tangentVelocity = relativeVelocity - (Vector3.Dot(relativeVelocity, frictionNormal) * frictionNormal)
@@ -3205,8 +3205,7 @@ module Engine =
                     effectiveNormalImpulse <- effectiveNormalImpulse + gravityImpulse
             
                 if effectiveNormalImpulse > 0.0 then
-                    let staticBody = Body.T()
-                    let frictionNormal = getStableFrictionNormal normal &b1 &staticBody
+                    let frictionNormal = getStableFrictionNormal normal b1.Orientation Matrix3x3.Identity
 
                     let relativeVelocity = b1.Velocity
                     let tangentVelocity = relativeVelocity - (Vector3.Dot(relativeVelocity, frictionNormal) * frictionNormal)
