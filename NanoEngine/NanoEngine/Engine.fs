@@ -43,10 +43,7 @@ module Engine =
     let [<Literal>] POSITION_THRESHOLD_SQ = (HEX_RADIUS * 0.04) * (HEX_RADIUS * 0.04)
     let [<Literal>] ORIENTATION_THRESHOLD = 0.9998 // cos(1.14 градуса)
     let [<Literal>] STATIC_BODY_MASS = 1e12
-    
-    let inline safeMass invMass =
-        if invMass > EPSILON then 1.0 / invMass else STATIC_BODY_MASS
-    
+
     [<RequireQualifiedAccess>]
     module Dispose =
         let inline action(a: #IDisposable) =
@@ -2475,12 +2472,8 @@ module Engine =
                 r._activeIslandIds.Remove removedId |> ignore
                 r._sleepingIslandIds.Remove removedId |> ignore
             r._removeIslandsBuffer.Clear()
-            
-        let processIslandChanges spatialHash (buffers: Buffers) r =
-
-            r._mergeRedirects.Clear()
-            r._islandsInvolvedInMerge.Clear()
-            
+        
+        let private wakeUpIslands spatialHash (buffers: Buffers) r =
             for islandId in r._islandsToWake do
                 let mutable island = &getIslandRef islandId r
                 if Unsafe.IsNullRef &island then
@@ -2507,13 +2500,13 @@ module Engine =
                     r._activeIslandIds.Add island.Id |> ignore
             r._islandsToWake.Clear()
 
+        let private mergeIslands r =        
             while r._islandsToMerge.Count > 0 do
                 let struct(sourceId, targetId) = r._islandsToMerge.Dequeue()
                 r |> islandMerge sourceId targetId
             r._islandsToMergePairs.Clear()
 
-            r |> removeIslands
-    
+        let private splitIslands r =        
             for islandIdToSplit in r._islandsMarkedForSplit do
                 let mutable originalIsland = &getIslandRef islandIdToSplit r
                 if not <| Unsafe.IsNullRef &originalIsland then
@@ -2576,6 +2569,7 @@ module Engine =
                     | ValueNone -> ()
             r._islandsMarkedForSplit.Clear()
 
+        let private putIslandsToSleep spatialHash r =         
             for islandId in r._islandsToSleep do
                 if r._activeIslandIds.Contains islandId then
                     let island = &getIslandRef islandId r
@@ -2613,9 +2607,27 @@ module Engine =
           
             r._islandsToSleep.Clear()
 
+        let filterEmptyIslands r =
             for island in r._allIslands.Values do
                 if island.Bodies.Count = 0 then
                     r._removeIslandsBuffer.Add island.Id
+                    
+        let processIslandChanges spatialHash buffers r =
+
+            r._mergeRedirects.Clear()
+            r._islandsInvolvedInMerge.Clear()
+            
+            r |> wakeUpIslands spatialHash buffers
+            
+            r |> mergeIslands
+
+            r |> removeIslands
+    
+            r |> splitIslands
+            
+            r |> putIslandsToSleep spatialHash
+            
+            r |> filterEmptyIslands
                     
             r |> removeIslands
     
@@ -2664,24 +2676,28 @@ module Engine =
                 islandCandidates
                 buffers.UniquePrismsBuffer
 
-            for islandId in islandCandidates do
-                if isFree then
-                    let otherIsland = &Island.getIslandRef islandId islandRepo
-                    if Collision.checkCollisionAABB candidateMinAABB candidateMaxAABB otherIsland.MinAABB otherIsland.MaxAABB then
-                        for otherId in otherIsland.BodiesSpan do
-                            if isFree && otherId <> bodyToSnapId then
-                                let otherBody = &Body.getRef otherId bodyRepo
-                                let result =
-                                    Collision.checkCollisionSAT
-                                        candidatePosition
-                                        bodyDimensions
-                                        bodyOrientation
-                                        otherBody.Position
-                                        otherBody.Dimensions
-                                        otherBody.Orientation
-                                
-                                if result.AreColliding then
-                                    isFree <- false
+            let mutable enumerator = islandCandidates.GetEnumerator()
+            while isFree && enumerator.MoveNext() do
+                let islandId = enumerator.Current
+                let otherIsland = &Island.getIslandRef islandId islandRepo
+                if Collision.checkCollisionAABB candidateMinAABB candidateMaxAABB otherIsland.MinAABB otherIsland.MaxAABB then
+                    let mutable i = 0
+                    while isFree && i < otherIsland.BodiesSpan.Length do
+                        let otherId = otherIsland.BodiesSpan[i]
+                        i <- i + 1
+                        if otherId <> bodyToSnapId then
+                            let otherBody = &Body.getRef otherId bodyRepo
+                            let result =
+                                Collision.checkCollisionSAT
+                                    candidatePosition
+                                    bodyDimensions
+                                    bodyOrientation
+                                    otherBody.Position
+                                    otherBody.Dimensions
+                                    otherBody.Orientation
+                            
+                            if result.AreColliding then
+                                isFree <- false
 
             if isFree then
                 Grid.fillOverlappingSubPrismsAABB
@@ -3148,6 +3164,9 @@ module Engine =
             if b1.IsFallingOver then
                 0.0
             else
+                let inline safeMass invMass =
+                    if invMass > EPSILON then 1.0 / invMass else STATIC_BODY_MASS
+    
                 let finalNormal = result.Normal
                 let penetrationDepth = result.Depth
                 let velAlongNormal = Vector3.Dot(b1.Velocity, finalNormal)
