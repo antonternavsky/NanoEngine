@@ -3307,7 +3307,7 @@ module Engine =
                 let island = &Island.getIslandRef islandId islandRepo
                 for id in island.BodiesSpan do
                     let body = &Body.getRef id bodyRepo
-                    if body.IsForceFalling && not body.IsFallingOver then
+                    if body.IsForceFalling && not <| body.IsFallingOver then
                         bodiesToInitiateFall.Add id
             
             for id in bodiesToInitiateFall.Span do
@@ -3725,7 +3725,9 @@ module Engine =
             let checkedBodyPairs = buffers.CollisionCheckedBodyPairs
             let destroyedFlora = buffers.CollisionDestroyedFlora
             let staticCache = engine._staticCache
-            
+            let processedStatic = buffers.CollisionProcessedStatic
+            let processedFlora = buffers.CollisionProcessedFlora
+                    
             checkedBodyPairs.Clear()
             destroyedFlora.Clear()
 
@@ -3741,8 +3743,6 @@ module Engine =
 
                     let occupiedCells = SpatialHash.getOccupiedCells id1 spatialHash
                     
-                    let processedStatic = buffers.CollisionProcessedStatic
-                    let processedFlora = buffers.CollisionProcessedFlora
                     processedStatic.Clear()
                     processedFlora.Clear()
 
