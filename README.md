@@ -16,10 +16,10 @@ The project includes a comprehensive test suite that demonstrates complex physic
     *   **Broad Phase:** A highly efficient **Spatial Hash** based on the hexagonal prism grid to quickly find potentially colliding bodies.
     *   **Mid-Phase:** An Axis-Aligned Bounding Box (AABB) check is performed on potential pairs from the broad phase. This is a quick rejection step that filters out many pairs before the more expensive narrow-phase check.
     *   **Narrow Phase:** For pairs that pass the AABB check, precise collision detection is performed using the **Separating Axis Theorem (SAT)** for Oriented Bounding Boxes (OBBs).
-*   **Advanced Sleeping System:** An **island-based sleeping system** dramatically improves performance by deactivating groups of objects that have come to rest. The engine intelligently manages waking, sleeping, merging, and splitting these islands.
+*   **Advanced Sleeping System:** An **island-based sleeping system** dramatically improves performance by deactivating groups of objects that have come to rest. The engine intelligently manages waking, sleeping, merging, and splitting these islands. 
 *   **Kinematic and Dynamic Interactions:** Supports standard dynamic objects, static geometry, and special entities like destructible flora (trees) and friction-inducing bushes.
 *   **Complex Scenarios:** Capable of handling complex behaviors like falling-over animations, grid-snapping for stable placement, and basic cellular automata for liquids.
-
+N^2 in collision cycle is a sensible decision, since 99% of the islands will contain up to 5 bodies, and the remaining 1% of the islands will have up to 10 bodies in the game for which this engine is supposed to be developed. The islands themselves will be widely scattered over a large area.
 ---
 
 ## Architectural Highlights & Nuances
