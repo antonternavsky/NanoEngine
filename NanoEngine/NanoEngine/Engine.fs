@@ -29,7 +29,9 @@ module Engine =
     let [<Literal>] MIN_DIMENSION_THRESHOLD = 0.001
     let [<Literal>] MAX_DIMENSION = 10.0
     let [<Literal>] GRID_WIDTH_Q = 65536
+    let [<Literal>] GRID_WIDTH_Q_DOUBLE = 65536.0
     let [<Literal>] GRID_DEPTH_R = 65536
+    let [<Literal>] GRID_DEPTH_R_DOUBLE = 65536.0
     let [<Literal>] GRID_HEIGHT_Z = 248
     let [<Literal>] HEX_HEIGHT = 1.0
     let [<Literal>] WORLD_HEIGHT_IN_METERS = 248.0 * 1.0
@@ -309,10 +311,10 @@ module Engine =
 
     [<RequireQualifiedAccess>]
     module WorldLimits =
-        let X = HEX_RADIUS * Math.Sqrt(3.0) * double GRID_WIDTH_Q
-        let Y = HEX_RADIUS * 1.5 * double GRID_DEPTH_R
-        let HalfX = X / 2.0
-        let HalfY = Y / 2.0
+        let [<Literal>] X = HEX_RADIUS * SQRT3 * GRID_WIDTH_Q_DOUBLE
+        let [<Literal>] Y = HEX_RADIUS * 1.5 * GRID_DEPTH_R_DOUBLE
+        let [<Literal>] HalfX = X / 2.0
+        let [<Literal>] HalfY = Y / 2.0
             
         let inline private wrap value range =
             if value >= 0.0 && value < range then
