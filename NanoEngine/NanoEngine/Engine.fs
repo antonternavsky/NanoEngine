@@ -3467,6 +3467,7 @@ module Engine =
             
             radiusZ
                         
+        let mutable private _verticalLimiter = Body.T()
         let private resolveFloorAndCeilingCollisions (b1: byref<Body.T>) invMass1 islandRepo dt =
             if invMass1 > EPSILON then
                 let mutable radiusZ = -1.0
@@ -3477,11 +3478,10 @@ module Engine =
                     if lowestPointZ < 0.0 then
                         let penetrationDepth = -lowestPointZ
                         let floorCollisionResult = CollisionResult.Create(Vector3.Up, penetrationDepth)
-                        let mutable floorBody = Body.T()
                         let totalImpulseScalar =
                             resolveDynamicCollision
                                 &b1
-                                &floorBody
+                                &_verticalLimiter
                                 floorCollisionResult
                                 invMass1
                                 0.0
@@ -3503,11 +3503,10 @@ module Engine =
 
                     let topPenetration = highestPointZ - WORLD_HEIGHT_IN_METERS
                     if topPenetration > 0.0 then
-                        let mutable floorBody = Body.T()
                         let ceilingCollisionResult = CollisionResult.Create(Vector3.Down, topPenetration)
                         resolveDynamicCollision
                             &b1
-                            &floorBody
+                            &_verticalLimiter
                             ceilingCollisionResult
                             b1.InvMass
                             0.0
