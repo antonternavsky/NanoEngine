@@ -3466,22 +3466,22 @@ module Engine =
                 radiusZ <- Collision.getProjectedRadiusZ b.Dimensions b.Orientation
             
             radiusZ
-                        
-        let mutable private _verticalLimiter = Body.T()
+
         let private resolveFloorAndCeilingCollisions (b1: byref<Body.T>) invMass1 islandRepo dt =
             if invMass1 > EPSILON then
-                let mutable radiusZ = -1.0
-
+                let mutable radiusZ = -1.0   
                 if b1.MinAABB.Z < PENETRATION_SLOP then
                     let lowestPointZ = b1.Position.Z - getRadiusZ &b1 &radiusZ
                     
                     if lowestPointZ < 0.0 then
                         let penetrationDepth = -lowestPointZ
                         let floorCollisionResult = CollisionResult.Create(Vector3.Up, penetrationDepth)
+                        
+                        let mutable floorBody = Body.T()
                         let totalImpulseScalar =
                             resolveDynamicCollision
                                 &b1
-                                &_verticalLimiter
+                                &floorBody
                                 floorCollisionResult
                                 invMass1
                                 0.0
@@ -3504,9 +3504,10 @@ module Engine =
                     let topPenetration = highestPointZ - WORLD_HEIGHT_IN_METERS
                     if topPenetration > 0.0 then
                         let ceilingCollisionResult = CollisionResult.Create(Vector3.Down, topPenetration)
+                        let mutable ceilingBody = Body.T()
                         resolveDynamicCollision
                             &b1
-                            &_verticalLimiter
+                            &ceilingBody
                             ceilingCollisionResult
                             b1.InvMass
                             0.0
