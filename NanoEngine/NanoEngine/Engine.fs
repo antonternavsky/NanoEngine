@@ -2334,7 +2334,6 @@ module Engine =
                 let mutable sourceIsland = &getIslandRef sourceId r
                 let mutable targetIsland = &getIslandRef targetId r
                 if not <| Unsafe.IsNullRef &sourceIsland && not <| Unsafe.IsNullRef &targetIsland then
-                    removeIslandFromGrid &sourceIsland r
                     removeIslandFromGrid &targetIsland r
                     
                     targetIsland.CantSleepFrames <- max sourceIsland.CantSleepFrames targetIsland.CantSleepFrames
