@@ -2375,8 +2375,6 @@ module Engine =
                     addIslandToGrid &targetIsland r
                     
                     r._freeIds.Add sourceIsland.Id
-                    
-                    sourceIsland |> Dispose.action
                     if not <| r._removeIslandsBuffer.Contains sourceId then
                        r._removeIslandsBuffer.Add sourceId
                 
@@ -2444,11 +2442,13 @@ module Engine =
                 r._logger.Debug("Request split island: {IslandId}", islandId)
         
         let private removeIslands r =
-            let mergedIdsToRemove = CollectionsMarshal.AsSpan r._removeIslandsBuffer
-            for removedId in mergedIdsToRemove do
+            let idsToRemove = CollectionsMarshal.AsSpan r._removeIslandsBuffer
+            for removedId in idsToRemove do
                 let island = &getIslandRef removedId r
                 if not <| Unsafe.IsNullRef &island then
                     removeIslandFromGrid &island r
+                    island |> Dispose.action
+
                 r._allIslands.Remove removedId |> ignore
                 r._activeIslandIds.Remove removedId |> ignore
                 r._sleepingIslandIds.Remove removedId |> ignore
