@@ -2460,8 +2460,7 @@ module Engine =
                 if Unsafe.IsNullRef &island then
                     r._removeIslandsBuffer.Add islandId
                 elif island.Bodies.Count = 0 then
-                        r._removeIslandsBuffer.Add island.Id
-                        island |> Dispose.action
+                    r._removeIslandsBuffer.Add island.Id
                 elif not <| island.IsAwake then
                     island.IsAwake <- true
                     island.FramesResting <- 0
@@ -2559,8 +2558,7 @@ module Engine =
                             r._removeIslandsBuffer.Add islandId
                     elif island.Bodies.Count = 0 then
                         if not <| r._removeIslandsBuffer.Contains islandId then
-                            r._removeIslandsBuffer.Add islandId
-                        island |> Dispose.action                       
+                            r._removeIslandsBuffer.Add islandId                  
                     elif island.IsAwake then
                         let mutable isStillEligibleForSleep = true
                         let mutable i = 0
