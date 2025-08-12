@@ -2010,11 +2010,64 @@ module Engine =
                     newId
                     
             new T(newId)
+        
+        let private calculateOccupiedCells (minCorner: Vector3) (maxCorner: Vector3) (cellSize: double) (buffer: PooledList<uint64>) =
+            buffer.Clear()
+            let gridCellsX = IslandGridPhase.worldToGridCoord WorldLimits.X cellSize
+            let gridCellsY = IslandGridPhase.worldToGridCoord WorldLimits.Y cellSize
+
+            let minGridX = IslandGridPhase.worldToGridCoord minCorner.X cellSize
+            let maxGridX = IslandGridPhase.worldToGridCoord maxCorner.X cellSize
+            let minGridY = IslandGridPhase.worldToGridCoord minCorner.Y cellSize
+            let maxGridY = IslandGridPhase.worldToGridCoord maxCorner.Y cellSize
+
+            let inline addKey (gx: int) (gy: int) =
+                let wrappedGx = (gx % gridCellsX + gridCellsX) % gridCellsX
+                let wrappedGy = (gy % gridCellsY + gridCellsY) % gridCellsY
+                let key = IslandGridPhase.packKey wrappedGx wrappedGy
+                buffer.Add key
+
+            let inline processYRange (gx: int) =
+                if minGridY <= maxGridY then
+                    for gy = minGridY to maxGridY do
+                        addKey gx gy
+                else
+                    for gy = minGridY to gridCellsY - 1 do
+                        addKey gx gy
+                    for gy = 0 to maxGridY do
+                        addKey gx gy
+
+            if minGridX <= maxGridX then
+                for gx = minGridX to maxGridX do
+                    processYRange gx
+            else
+                for gx = minGridX to gridCellsX - 1 do
+                    processYRange gx
+                for gx = 0 to maxGridX do
+                    processYRange gx
+        
+        let private addIslandToGrid (island: byref<T>) r =
+            let islandId = island.Id
+            let tempBuffer = island.OccupiedGridCells
             
+            calculateOccupiedCells island.MinAABB island.MaxAABB r._gridCellSize tempBuffer
+            
+            for cellKey in tempBuffer.Span do
+                let mutable isListExists = false
+                let list = &CollectionsMarshal.GetValueRefOrAddDefault(r._islandGrid, cellKey, &isListExists)
+                if not <| isListExists then
+                    list <- new PooledList<int>()
+                    
+                list.Add islandId
+   
         let init r =   
             for bodyId in r._bodyRepo |> Body.getKeys do
-                let newIsland = r |> newIsland
+                let mutable newIsland = r |> newIsland
+                
                 newIsland.AddBody bodyId
+                recalculateAABB &newIsland r
+                addIslandToGrid &newIsland r
+                
                 r._bodyToIslandMap.Add(bodyId, newIsland.Id)
                 r._allIslands.Add(newIsland.Id, newIsland)
                 r._activeIslandIds.Add newIsland.Id |> ignore
@@ -2171,41 +2224,6 @@ module Engine =
         let getIslandIdForBody bodyId r = r._bodyToIslandMap[bodyId]
         let getIslandRef islandId r = &CollectionsMarshal.GetValueRefOrNullRef(r._allIslands, islandId)
         
-        let private calculateOccupiedCells (minCorner: Vector3) (maxCorner: Vector3) (cellSize: double) (buffer: PooledList<uint64>) =
-            buffer.Clear()
-            let gridCellsX = IslandGridPhase.worldToGridCoord WorldLimits.X cellSize
-            let gridCellsY = IslandGridPhase.worldToGridCoord WorldLimits.Y cellSize
-
-            let minGridX = IslandGridPhase.worldToGridCoord minCorner.X cellSize
-            let maxGridX = IslandGridPhase.worldToGridCoord maxCorner.X cellSize
-            let minGridY = IslandGridPhase.worldToGridCoord minCorner.Y cellSize
-            let maxGridY = IslandGridPhase.worldToGridCoord maxCorner.Y cellSize
-
-            let inline addKey (gx: int) (gy: int) =
-                let wrappedGx = (gx % gridCellsX + gridCellsX) % gridCellsX
-                let wrappedGy = (gy % gridCellsY + gridCellsY) % gridCellsY
-                let key = IslandGridPhase.packKey wrappedGx wrappedGy
-                buffer.Add key
-
-            let inline processYRange (gx: int) =
-                if minGridY <= maxGridY then
-                    for gy = minGridY to maxGridY do
-                        addKey gx gy
-                else
-                    for gy = minGridY to gridCellsY - 1 do
-                        addKey gx gy
-                    for gy = 0 to maxGridY do
-                        addKey gx gy
-
-            if minGridX <= maxGridX then
-                for gx = minGridX to maxGridX do
-                    processYRange gx
-            else
-                for gx = minGridX to gridCellsX - 1 do
-                    processYRange gx
-                for gx = 0 to maxGridX do
-                    processYRange gx
-        
         let queryIslandsByAABB 
             (minAABB: Vector3) 
             (maxAABB: Vector3) 
@@ -2235,20 +2253,6 @@ module Engine =
                         idList |> Dispose.action
                 | false, _ -> ()
             island.OccupiedGridCells.Clear()
-
-        let private addIslandToGrid (island: byref<T>) r =
-            let islandId = island.Id
-            let tempBuffer = island.OccupiedGridCells
-            
-            calculateOccupiedCells island.MinAABB island.MaxAABB r._gridCellSize tempBuffer
-            
-            for cellKey in tempBuffer.Span do
-                let mutable isListExists = false
-                let list = &CollectionsMarshal.GetValueRefOrAddDefault(r._islandGrid, cellKey, &isListExists)
-                if not <| isListExists then
-                    list <- new PooledList<int>()
-                    
-                list.Add islandId
 
         let private updateIslandInGrid (island: byref<T>) r =
             r._newOccupiedCellsBuffer.Clear()
@@ -2316,12 +2320,14 @@ module Engine =
             let islandId = &CollectionsMarshal.GetValueRefOrAddDefault(r._bodyToIslandMap, bodyId, &isFound)
             if not <| isFound then 
                 let mutable newIsland = r |> newIsland
-                r._allIslands.Add(newIsland.Id, newIsland)
                 islandId <- newIsland.Id
+                
                 newIsland.AddBody bodyId
-                r._activeIslandIds.Add newIsland.Id |> ignore
                 recalculateAABB &newIsland r
                 addIslandToGrid &newIsland r
+                
+                r._allIslands.Add(newIsland.Id, newIsland)
+                r._activeIslandIds.Add newIsland.Id |> ignore
                 
         let removeBody bodyId r =
             let mutable islandId = 0
