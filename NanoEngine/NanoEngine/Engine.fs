@@ -602,7 +602,6 @@ module Engine =
                 orientation,
                 position,
                 velocity,
-                supportCoords,
                 friction) =
                 let struct(minCorner, maxCorner) =
                     Collision.getAABB
@@ -622,7 +621,6 @@ module Engine =
                     Orientation = orientation
                     Position = position
                     Velocity = velocity
-                    SupportCoords = supportCoords
                     FrictionCoefficient = friction
                     IsFallingOver = false
                     FallRotationProgress = 0.0
@@ -655,7 +653,6 @@ module Engine =
                             min MAX_DIMENSION (max value.Z MIN_DIMENSION_THRESHOLD))
                         
             val mutable Orientation: Matrix3x3
-            val SupportCoords: SubPrismCoords
             val FrictionCoefficient: double
             val mutable IsFallingOver: bool
             val mutable FallRotationProgress: double
@@ -1057,7 +1054,6 @@ module Engine =
                                 orientation,
                                 position,
                                 Vector3.Zero,
-                                coords,
                                 0.5)
 
                         r._idGenerator <- r._idGenerator - 1
@@ -1093,7 +1089,6 @@ module Engine =
                 Matrix3x3.Identity,
                 flora.Position,
                 Vector3.Zero,
-                flora.SupportCoordsKey |> SubPrismKey.unpack,
                 flora.FrictionCoefficient
             )
         
@@ -1866,7 +1861,7 @@ module Engine =
                     
             member this.NextStep() =
                 this.MaxPenetrationThisStep <- 0.0
-                if this.IsSlow && not <| isNull this._contactsHolder then
+                if not <| isNull this._contactsHolder then
                     let struct(newContacts, contactsWereRemoved) = this._contactsHolder.Contacts.NextStep()
                     this._contactsHolder.Contacts <- newContacts
                     this.HadContactsRemovedThisStep <- contactsWereRemoved

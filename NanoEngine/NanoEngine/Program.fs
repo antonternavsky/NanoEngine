@@ -164,7 +164,7 @@ module Tests =
             let bodyId = _state.Engine |> nextBodyId
             let mutable pos = pos
             WorldLimits.wrapPosition &pos
-            let body = Body.T(bodyId, bType, mass, dims, Matrix3x3.Identity, pos, vel, SubPrismCoords.Zero, friction)
+            let body = Body.T(bodyId, bType, mass, dims, Matrix3x3.Identity, pos, vel, friction)
             Body.tryAdd &body _state.BodyRepo |> ignore
             bodyId
 
@@ -591,7 +591,7 @@ let main _ =
                 if runner.State.IslandRepo.ActiveIslandIds.Count = 0 then
                     runner.State.TestPhase <- 16
                     InProgress
-                elif i >= 620 then
+                elif i >= 580 then
                     Assert.Fail "STAGE 15 FAIL: The scene did not stabilize after being cleared by a bulldozer"
                 else
                     let bulldozerId = runner.Recall<int>("bulldozerId")
@@ -636,8 +636,8 @@ let main _ =
                         Assert.IsTrue(p.X >= 0 && p.X <= 10 || p.X >= 65500) "p.X >= 0 && p.X <= 10 || p.X >= 65500"
                         Assert.IsTrue(p.Y >= 0 && p.Y <= 10 || p.Y >= 56700) "p.Y >= 0 && p.Y <= 10 || p.Y >= 56700"
                         
-                if sleepingIslandCount = 4 then
-                    Assert.AreEqual 4 runner.State.IslandRepo.SleepingIslandIds.Count "STAGE 16 FAIL: Expected exactly 4 sleeping islands"
+                if sleepingIslandCount = 5 then
+                    Assert.AreEqual 5 runner.State.IslandRepo.SleepingIslandIds.Count "STAGE 16 FAIL: Expected exactly 5 sleeping islands"
                     Assert.AreEqual 0 runner.State.IslandRepo.ActiveIslandIds.Count "STAGE 16 FAIL: All islands must be asleep"
 
                     let firstId   = runner.Recall<int>("firstId")
@@ -654,12 +654,14 @@ let main _ =
 
                     let island_floor_pile_1 = runner.GetIslandRefForBody firstId
                     let island_floor_pile_2 = runner.GetIslandRefForBody bulletId1
+                    let island_floor_pile_3 = runner.GetIslandRefForBody thirdId
                     let island_bulldozer_and_tree = runner.GetIslandRefForBody bulldozerId
                     let island_domino = runner.GetIslandRefForBody dominoId
 
-                    Assert.AreEqual (set [firstId; secondId; thirdId]) (set island_floor_pile_1.Bodies) "STAGE 16 FAIL: Incorrect island composition. Expected [1; 4; 5]"
+                    Assert.AreEqual (set [firstId; secondId]) (set island_floor_pile_1.Bodies) "STAGE 16 FAIL: Incorrect island composition. Expected [1; 4]"
                     Assert.AreEqual (set [bulletId1; bulletId2]) (set island_floor_pile_2.Bodies) "STAGE 16 FAIL: Incorrect island composition. Expected [6; 7]"
                     Assert.AreEqual (set [bulldozerId; fallenTreeBodyId]) (set island_bulldozer_and_tree.Bodies) "STAGE 16 FAIL: Incorrect composition for the bulldozer and tree island. Expected [9; 2]"
+                    Assert.AreEqual (set [thirdId]) (set island_floor_pile_3.Bodies) "STAGE 16 FAIL: Body (ID 5) should be in its own separate island"
                     Assert.AreEqual (set [dominoId]) (set island_domino.Bodies) "STAGE 16 FAIL: Domino (ID 8) should be in its own separate island"
 
                     let platformZ = (double 10 + 1.0) * HEX_HEIGHT
@@ -699,7 +701,7 @@ let main _ =
                     Success $"{loc} COMPLETED"
 
                 else
-                    Assert.Fail $"[{loc}] Unexpected number of sleeping islands: {sleepingIslandCount}. The test requires exactly 4"
+                    Assert.Fail $"[{loc}] Unexpected number of sleeping islands: {sleepingIslandCount}. The test requires exactly 5"
             | _ -> InProgress
     })
     
