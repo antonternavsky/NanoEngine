@@ -2093,29 +2093,7 @@ module Engine =
                 | _ -> ()
                     
             adjacencyMap
-        
-        let private findSingleConnectedComponent
-            (startNode: int)
-            (adjacencyMap: IDictionary<int, PooledList<int>>)
-            (visited: PooledSet<int>) =
-            
-            let newComponent = new PooledList<int>()
-            use queue = new PooledQueue<int>()
 
-            if not <| visited.Contains startNode then
-                queue.Enqueue startNode
-                visited.Add startNode |> ignore
-
-                while queue.Count > 0 do
-                    let currentId = queue.Dequeue()
-                    newComponent.Add currentId
-
-                    for neighborId in adjacencyMap[currentId].Span do
-                        if visited.Add neighborId then
-                            queue.Enqueue neighborId
-            
-            newComponent
-            
         let private findConnectedComponents
             (bodiesToAnalyze: ReadOnlySpan<int>)
             (island: inref<T>) =
