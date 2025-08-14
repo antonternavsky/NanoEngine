@@ -1872,9 +1872,10 @@ module Engine =
                 let contactsHolder = this._contactsHolder
                 if not <| isNull contactsHolder then
                     this._contactsHolder <- null
-                    this.Bodies |> Dispose.action
-                    this.OccupiedGridCells |> Dispose.action
                     contactsHolder.Contacts |> Dispose.action
+                    
+                this.Bodies |> Dispose.action
+                this.OccupiedGridCells |> Dispose.action
                     
             interface IDisposable with
                 member this.Dispose() = this.Dispose()
