@@ -2261,8 +2261,8 @@ module Engine =
                             let id1 = idsSpan[i]
                             let id2 = idsSpan[j]
 
-                            let mutable island1 = &getIslandRef id1 r
-                            let mutable island2 = &getIslandRef id2 r
+                            let island1 = &getIslandRef id1 r
+                            let island2 = &getIslandRef id2 r
 
                             if island1.IsAwake || island2.IsAwake then
                                 let pairKey = ContactKey.key id1 id2
@@ -2292,7 +2292,7 @@ module Engine =
             if r._bodyToIslandMap.TryGetValue(bodyId, &islandId) then
                 r._bodyToIslandMap.Remove bodyId |> ignore
                 
-                let mutable island = &getIslandRef islandId r
+                let island = &getIslandRef islandId r
                 island.RemoveBody bodyId
                 if island.BodiesSpan.Length = 0 then
                     if not <| r._removeIslandsBuffer.Contains islandId then
@@ -2311,8 +2311,8 @@ module Engine =
             
         let islandMerge sourceId targetId r =
             if sourceId <> targetId then
-                let mutable sourceIsland = &getIslandRef sourceId r
-                let mutable targetIsland = &getIslandRef targetId r
+                let sourceIsland = &getIslandRef sourceId r
+                let targetIsland = &getIslandRef targetId r
                 if not <| Unsafe.IsNullRef &sourceIsland && not <| Unsafe.IsNullRef &targetIsland then
                     removeIslandFromGrid &targetIsland r
                     
@@ -2386,8 +2386,8 @@ module Engine =
                     if r._islandsMarkedForSplit.Contains root1 || r._islandsMarkedForSplit.Contains root2 then
                         r._logger.Debug("Merge deferred for ({Id1}, {Id2}) because one root is marked for split", id1, id2)
                     else
-                        let mutable island1 = &getIslandRef root1 r
-                        let mutable island2 = &getIslandRef root2 r
+                        let island1 = &getIslandRef root1 r
+                        let island2 = &getIslandRef root2 r
                         if not <| Unsafe.IsNullRef &island1 && not <| Unsafe.IsNullRef &island2 then
                             requestWakeIsland &island1 r
                             requestWakeIsland &island2 r
@@ -2435,7 +2435,7 @@ module Engine =
         
         let private wakeUpIslands spatialHash (buffers: Buffers) r =
             for islandId in r._islandsToWake do
-                let mutable island = &getIslandRef islandId r
+                let island = &getIslandRef islandId r
                 if Unsafe.IsNullRef &island then
                     r._removeIslandsBuffer.Add islandId
                 elif island.Bodies.Count = 0 then
@@ -2467,7 +2467,7 @@ module Engine =
 
         let private splitIslands r =        
             for islandIdToSplit in r._islandsMarkedForSplit do
-                let mutable originalIsland = &getIslandRef islandIdToSplit r
+                let originalIsland = &getIslandRef islandIdToSplit r
                 if not <| Unsafe.IsNullRef &originalIsland then
                     match findConnectedComponents originalIsland.BodiesSpan &originalIsland with
                     | ValueSome components ->
@@ -3740,8 +3740,8 @@ module Engine =
                         
             for pairKey in collidingIslandPairs do
                 let struct(islandId1, islandId2) = ContactKey.unpack pairKey            
-                let mutable island1 = &Island.getIslandRef islandId1 islandRepo
-                let mutable island2 = &Island.getIslandRef islandId2 islandRepo
+                let island1 = &Island.getIslandRef islandId1 islandRepo
+                let island2 = &Island.getIslandRef islandId2 islandRepo
 
                 for bodyId1 in island1.BodiesSpan do
                     for bodyId2 in island2.BodiesSpan do                       
@@ -3907,7 +3907,7 @@ module Engine =
             buffers.Clear()
             
             for islandId in engine._islandRepo.ActiveIslandIds do
-                let mutable island = &Island.getIslandRef islandId engine._islandRepo
+                let island = &Island.getIslandRef islandId engine._islandRepo
                 island.NextStep() 
                 for bodyId in island.BodiesSpan do
                     let body = &Body.getRef bodyId engine._bodyRepo
