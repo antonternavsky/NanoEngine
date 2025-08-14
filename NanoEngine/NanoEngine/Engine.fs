@@ -2509,7 +2509,9 @@ module Engine =
                                 newFragmentIsland.IsGroundedCacheValid <- false
        
                                 recalculateAABBAndUpdateGrid &newFragmentIsland r
-                                
+                        
+                        // After r._allIslands.Add ref may be invalid
+                        let originalIsland = &getIslandRef islandIdToSplit r         
                         originalIsland.IsGroundedCacheValid <- false
  
                         recalculateAABBAndUpdateGrid &originalIsland r
