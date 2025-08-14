@@ -2149,9 +2149,10 @@ module Engine =
                     island.IsGrounded <- hasStaticSupport &body spatialHash geometryRepo r
                     island.IsGroundedCacheValid <- true 
                 else
-                    use bodyIdsWithGround = new PooledList<int>(bodiesSpan)
-                    bodyIdsWithGround.Add GROUND_NODE_ID
-                    use dsu = DSU.create bodyIdsWithGround.Span
+                    let bodyIdsWithGround : Span<int> = Stack.alloc (bodiesSpan.Length + 1)
+                    bodiesSpan.CopyTo bodyIdsWithGround
+                    bodyIdsWithGround[bodiesSpan.Length] <- GROUND_NODE_ID
+                    use dsu = DSU.create bodyIdsWithGround
 
                     for bodyId in bodiesSpan do
                         let body = &Body.getRef bodyId bodyRepo
@@ -2523,6 +2524,7 @@ module Engine =
                             originalIsland.RemoveContact key |> ignore
 
                         components |> Seq.iter Dispose.action
+                        components |> Dispose.action
                     | ValueNone -> ()
             r._islandsMarkedForSplit.Clear()
 
