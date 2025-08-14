@@ -2072,28 +2072,6 @@ module Engine =
                 r._allIslands.Add(newIsland.Id, newIsland)
                 r._activeIslandIds.Add newIsland.Id |> ignore
 
-        let private buildAdjacencyMap
-            (bodies: ReadOnlySpan<int>)
-            (contactKeys: ICollection<int64>)
-            =
-            
-            let adjacencyMap = new PooledDictionary<int, PooledList<int>>()
-            for bodyId in bodies do
-                adjacencyMap.Add(bodyId, new PooledList<int>())
-
-            for contactKey in contactKeys do
-                let struct(id1, id2) = contactKey |> ContactKey.unpack
-                match adjacencyMap.TryGetValue id1 with
-                | true, a1 ->
-                    match adjacencyMap.TryGetValue id2 with
-                    | true, a2 ->
-                        a1.Add id2
-                        a2.Add id1
-                    | _ -> ()
-                | _ -> ()
-                    
-            adjacencyMap
-
         let private findConnectedComponents
             (bodiesToAnalyze: ReadOnlySpan<int>)
             (island: inref<T>) =
@@ -2229,7 +2207,7 @@ module Engine =
                     if idList |> Utils.removeBySwapBack islandId && idList.Count = 0 then
                         r._islandGrid.Remove cellKey |> ignore
                         idList |> Dispose.action
-                | false, _ -> ()
+                | false, _ -> r._logger.Warning("CellKey {CellKey} was not found", cellKey)
             island.OccupiedGridCells.Clear()
 
         let private updateIslandInGrid (island: byref<T>) r =
@@ -2251,7 +2229,7 @@ module Engine =
                         if idList |> Utils.removeBySwapBack islandId && idList.Count = 0 then
                             r._islandGrid.Remove oldCellKey |> ignore
                             idList |> Dispose.action
-                    | false, _ -> ()
+                    | false, _ -> r._logger.Warning("CellKey {CellKey} was not found", oldCellKey)
 
             for newCellKey in r._newCellsFilter do
                 let mutable isListExists = false
