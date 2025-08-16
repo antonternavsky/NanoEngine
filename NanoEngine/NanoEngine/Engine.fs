@@ -854,10 +854,10 @@ module Engine =
             let struct(minLocal, maxLocal) = _precomputedPrismAABBs[coords.SubIndex]
             struct(minLocal + prismCenter, maxLocal + prismCenter)
 
-        let inline private fillGridFromCorners
+        let private fillGridFromCorners
             (corners: Span<Vector3>)
-            (minAABB: Vector3)
-            (maxAABB: Vector3)
+            (minAABB: inref<Vector3>)
+            (maxAABB: inref<Vector3>)
             (filter: HashSet<uint64>) =
             let mutable rawMinQ, rawMaxQ = Int32.MaxValue, Int32.MinValue
             let mutable rawMinR, rawMaxR = Int32.MaxValue, Int32.MinValue
@@ -872,7 +872,7 @@ module Engine =
                 if rawZ < rawMinZ then rawMinZ <- rawZ
                 if rawZ > rawMaxZ then rawMaxZ <- rawZ
 
-            let inline checkAndAddSubPrisms q r z startIndex endIndex =
+            let inline checkAndAddSubPrisms minAABB maxAABB q r z startIndex endIndex =
                 for sub_idx = startIndex to endIndex do
                     let subPrismCoords = SubPrismCoords.Normalize(q, r, z, sub_idx)
                     let struct(minPrism, maxPrism) = getTriangularPrismAABB subPrismCoords
@@ -897,9 +897,9 @@ module Engine =
                                 let overlapsTopHalf = maxAABB.Z >= halfZ && minAABB.Z < hexTopZ
                                 
                                 if overlapsBottomHalf then
-                                    checkAndAddSubPrisms q r z 0 5
+                                    checkAndAddSubPrisms minAABB maxAABB q r z 0 5
                                 if overlapsTopHalf then
-                                    checkAndAddSubPrisms q r z 6 11
+                                    checkAndAddSubPrisms minAABB maxAABB q r z 6 11
 
         let inline private fillForShift
             (shift: Vector3)
@@ -922,7 +922,7 @@ module Engine =
             let shiftedPos = p + shift
             let struct(shiftedMin, shiftedMax) = Collision.getAABB shiftedPos d o
 
-            fillGridFromCorners shiftBuffer shiftedMin shiftedMax filter
+            fillGridFromCorners shiftBuffer &shiftedMin &shiftedMax filter
             
         let fillOverlappingSubPrismsAABB
             (p: Vector3)
@@ -947,7 +947,7 @@ module Engine =
                 
             let struct(minAABB, maxAABB) = Collision.getAABB p d o
             
-            fillGridFromCorners worldCorners minAABB maxAABB filter
+            fillGridFromCorners worldCorners &minAABB &maxAABB filter
 
             let margin = (max d.X d.Y) * 1.5
             let nearMinX = minAABB.X < margin

@@ -705,31 +705,33 @@ let main _ =
             | _ -> InProgress
     })
     
-    let mutable passedCount = 0
-    let mutable totalRuns = 0
-    let stopwatch = Stopwatch.StartNew()
-    let locationsToTest = [
-        TestLocation.Center
-        TestLocation.BorderMinX
-        TestLocation.BorderMaxX
-        TestLocation.BorderMinY
-        TestLocation.BorderMaxY
-        TestLocation.CornerMinXMinY
-        TestLocation.CornerMaxXMinY
-        TestLocation.CornerMinXMaxY
-        TestLocation.CornerMaxXMaxY
-    ]
-    
-    for testDef in tests do
-        for location in locationsToTest do
-            totalRuns <- totalRuns + 1
-            if runTest testDef location then passedCount <- passedCount + 1
+    for i = 0 to 9 do
+        let mutable passedCount = 0
+        let mutable totalRuns = 0
+        let stopwatch = Stopwatch.StartNew()
+        let locationsToTest = [
+            TestLocation.Center
+            TestLocation.BorderMinX
+            TestLocation.BorderMaxX
+            TestLocation.BorderMinY
+            TestLocation.BorderMaxY
+            TestLocation.CornerMinXMinY
+            TestLocation.CornerMaxXMinY
+            TestLocation.CornerMinXMaxY
+            TestLocation.CornerMaxXMaxY
+        ]
+        
+        for testDef in tests do
+            for location in locationsToTest do
+                totalRuns <- totalRuns + 1
+                if runTest testDef location then passedCount <- passedCount + 1
+                
+        stopwatch.Stop()
+        printfn "Completed: %d / %d" passedCount totalRuns
+        printfn "Duration: %d ms" stopwatch.ElapsedMilliseconds
+        if passedCount = totalRuns then
+            printfn "SUCCESS"
+        else
+            printfn "FAILURE"
             
-    stopwatch.Stop()
-    printfn "Completed: %d / %d" passedCount totalRuns
-    printfn "Duration: %d ms" stopwatch.ElapsedMilliseconds
-    if passedCount = totalRuns then
-        printfn "SUCCESS"
-    else
-        printfn "FAILURE"
     0
