@@ -486,8 +486,8 @@ module Engine =
                 AxisTestResultF(false, Single.MaxValue, MathF.Vector3f.Zero, false)
 
         let checkCollisionSATWithCachedAxis
-            (p1: Vector3) (d1: Vector3) (o1: Matrix3x3)
-            (p2: Vector3) (d2: Vector3) (o2: Matrix3x3)
+            (p1: inref<Vector3>) (d1: inref<Vector3>) (o1: inref<Matrix3x3>)
+            (p2: inref<Vector3>) (d2: inref<Vector3>) (o2: inref<Matrix3x3>)
             (cachedAxisIndex: int) =
 
             let mutable delta_d = p1 - p2
@@ -581,7 +581,7 @@ module Engine =
                 runSATLoop 0 -1 Single.MaxValue MathF.Vector3f.Zero -1
 
         let inline checkCollisionSAT (p1: Vector3) (d1: Vector3) (o1: Matrix3x3) (p2: Vector3) (d2: Vector3) (o2: Matrix3x3) =
-            let struct(result, _) = checkCollisionSATWithCachedAxis p1 d1 o1 p2 d2 o2 -1
+            let struct(result, _) = checkCollisionSATWithCachedAxis &p1 &d1 &o1 &p2 &d2 &o2 -1
             result   
     
     [<RequireQualifiedAccess>]
@@ -613,7 +613,7 @@ module Engine =
                     BodyType = bodyType
                     Mass = mass
                     InvMass = if mass <= EPSILON then 0.0 else 1.0 / mass
-                    _dimensions =
+                    Dimensions =
                         Vector3(
                             min MAX_DIMENSION (max dimensions.X MIN_DIMENSION_THRESHOLD),
                             min MAX_DIMENSION (max dimensions.Y MIN_DIMENSION_THRESHOLD),
@@ -642,16 +642,7 @@ module Engine =
             val mutable InvMass: double
             val mutable Position: Vector3
             val mutable Velocity: Vector3
-            val mutable private _dimensions: Vector3
-            member this.Dimensions
-                with get() = this._dimensions
-                and set (value: Vector3) =
-                    this._dimensions <-
-                        Vector3(
-                            min MAX_DIMENSION (max value.X MIN_DIMENSION_THRESHOLD),
-                            min MAX_DIMENSION (max value.Y MIN_DIMENSION_THRESHOLD),
-                            min MAX_DIMENSION (max value.Z MIN_DIMENSION_THRESHOLD))
-                        
+            val mutable Dimensions: Vector3
             val mutable Orientation: Matrix3x3
             val FrictionCoefficient: double
             val mutable IsFallingOver: bool
@@ -3492,12 +3483,12 @@ module Engine =
 
                 let struct(result, newCachedAxis) =
                     Collision.checkCollisionSATWithCachedAxis
-                        b1.Position
-                        b1.Dimensions
-                        b1.Orientation
-                        b2.Position
-                        b2.Dimensions
-                        b2.Orientation
+                        &b1.Position
+                        &b1.Dimensions
+                        &b1.Orientation
+                        &b2.Position
+                        &b2.Dimensions
+                        &b2.Orientation
                         cachedAxis
                     
                 if result.AreColliding then
@@ -3551,12 +3542,12 @@ module Engine =
         
                 let struct(result, newCachedAxis) =
                     Collision.checkCollisionSATWithCachedAxis
-                        b1.Position
-                        b1.Dimensions
-                        b1.Orientation
-                        b2.Position
-                        b2.Dimensions
-                        b2.Orientation
+                        &b1.Position
+                        &b1.Dimensions
+                        &b1.Orientation
+                        &b2.Position
+                        &b2.Dimensions
+                        &b2.Orientation
                         cachedAxis
                         
                 if result.AreColliding then
