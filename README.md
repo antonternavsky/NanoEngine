@@ -1,4 +1,4 @@
-#The project has been archived - after the code has been transferred to the main stealth project and adapted to the existing infrastructure of main project, this project will no longer develop.
+# The project has been archived - after the code has been transferred to the main stealth project and adapted to the existing infrastructure of main project, this project will no longer develop.
 
 # NanoEngine - A very simple 3D Physics Engine in F#
 
